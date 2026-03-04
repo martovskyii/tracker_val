@@ -402,6 +402,34 @@ button:active {
   gap: 8px;
 }
 
+.budget-filters {
+  display: grid;
+  grid-template-columns: 1fr clamp(92px, 28vw, 140px);
+  gap: 12px;
+  align-items: end;
+}
+
+.budget-filters .field {
+  min-width: 0;
+}
+
+.budget-filters input,
+.budget-filters select {
+  height: 48px;
+  min-height: 48px;
+  border-radius: 16px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  line-height: 1.2;
+}
+
+.budget-filters input {
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
 .progress-track {
   margin-top: 10px;
   height: 8px;
@@ -616,6 +644,12 @@ button:active {
 
   .category-columns {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 420px) {
+  .budget-filters {
+    grid-template-columns: 1fr clamp(92px, 26vw, 132px);
   }
 }
 
