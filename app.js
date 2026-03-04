@@ -1,4 +1,4 @@
-const TAB_IDS = ["add", "transactions", "analytics", "budgets", "settings"];
+const TAB_IDS = ["add", "transactions", "analytics", "budgets", "settings", "savings"];
 const CURRENCIES = ["UAH", "USD", "EUR", "PLN", "GEL"];
 
 const STORAGE_KEYS = {
@@ -6,7 +6,8 @@ const STORAGE_KEYS = {
   categories: "ft_v1_categories",
   budgets: "ft_v1_budgets",
   settings: "ft_v1_settings",
-  recurring: "ft_v1_recurring"
+  recurring: "ft_v1_recurring",
+  savings: "ft_v1_savings"
 };
 
 const DEFAULT_SETTINGS = {
@@ -25,6 +26,7 @@ const state = {
   categories: [],
   budgets: [],
   recurring: [],
+  savings: [],
   settings: { ...DEFAULT_SETTINGS },
   ui: {
     addType: "expense",
@@ -33,6 +35,8 @@ const state = {
     txCategoryFilter: "all",
     txMonthFilter: "",
     reportCurrency: "UAH",
+    savingsCurrencyFilter: "all",
+    savingsKindFilter: "all",
     analyticsMonth: monthKeyOf(new Date()),
     budgetsMonth: monthKeyOf(new Date()),
     ioStatus: "",
@@ -197,6 +201,57 @@ function onViewClick(event) {
   if (target.matches("[data-action='open-new-category']")) {
     const type = sanitizeType(target.dataset.type || state.ui.addType);
     openManageCategoriesModal(type, "");
+    return;
+  }
+
+  if (target.matches("[data-action='set-savings-kind-filter']")) {
+    state.ui.savingsKindFilter = sanitizeSavingsKindFilter(target.dataset.value);
+    render();
+    return;
+  }
+
+  if (target.matches("[data-action='open-savings-create']")) {
+    openSavingsModal("create");
+    return;
+  }
+
+  if (target.matches("[data-action='edit-savings']")) {
+    const id = String(target.dataset.id || "");
+    if (id) {
+      openSavingsModal("edit", id);
+    }
+    return;
+  }
+
+  if (target.matches("[data-action='edit-savings-rates']")) {
+    const id = String(target.dataset.id || "");
+    if (id) {
+      openSavingsModal("edit", id, "rates");
+    }
+    return;
+  }
+
+  if (target.matches("[data-action='delete-savings']")) {
+    const id = String(target.dataset.id || "");
+    if (id) {
+      deleteSavingsItem(id);
+    }
+    return;
+  }
+
+  if (target.matches("[data-action='savings-add']")) {
+    const id = String(target.dataset.id || "");
+    if (id) {
+      openSavingsFundsModal(id, "add");
+    }
+    return;
+  }
+
+  if (target.matches("[data-action='savings-withdraw']")) {
+    const id = String(target.dataset.id || "");
+    if (id) {
+      openSavingsFundsModal(id, "withdraw");
+    }
   }
 }
 
@@ -229,6 +284,12 @@ function onViewChange(event) {
 
   if (target.matches("#tx-month-filter")) {
     state.ui.txMonthFilter = String(target.value || "");
+    render();
+    return;
+  }
+
+  if (target.matches("#savings-currency-filter")) {
+    state.ui.savingsCurrencyFilter = sanitizeSavingsCurrencyFilter(target.value);
     render();
     return;
   }
@@ -343,6 +404,18 @@ function onModalSubmit(event) {
   if (form.matches("[data-form='budget-add']")) {
     const formData = new FormData(form);
     addBudgetFromModal(formData);
+    return;
+  }
+
+  if (form.matches("[data-form='savings-edit']")) {
+    const formData = new FormData(form);
+    submitSavingsModal(formData);
+    return;
+  }
+
+  if (form.matches("[data-form='savings-funds']")) {
+    const formData = new FormData(form);
+    submitSavingsFunds(formData);
   }
 }
 
@@ -373,7 +446,8 @@ function renderView() {
     transactions: buildTransactionsTab,
     analytics: buildAnalyticsTab,
     budgets: buildBudgetsTab,
-    settings: buildSettingsTab
+    settings: buildSettingsTab,
+    savings: buildSavingsTab
   };
 
   const build = builders[state.activeTab] || builders.add;
@@ -662,6 +736,158 @@ function buildSettingsTab() {
         <button class="btn-danger" type="button" data-action="reset-all">Сбросить все данные</button>
       </article>
     </section>
+  `;
+}
+
+function buildSavingsTab() {
+  const currencyFilter = state.ui.savingsCurrencyFilter;
+  const kindFilter = state.ui.savingsKindFilter;
+
+  const filtered = state.savings
+    .filter((item) => kindFilter === "all" || item.kind === kindFilter)
+    .filter((item) => {
+      if (currencyFilter === "all") {
+        return true;
+      }
+      if (item.kind === "account") {
+        return item.currency === currencyFilter;
+      }
+      const balances = normalizeGoalBalancesMap(item.balances);
+      return Object.prototype.hasOwnProperty.call(balances, currencyFilter) || item.targetCurrency === currencyFilter;
+    });
+
+  const totals = computeSavingsTotals(filtered, currencyFilter);
+  const totalsHtml = currencyFilter === "all"
+    ? (totals.byCurrency.length
+      ? totals.byCurrency.map((entry) => {
+        return `<span class="savings-total-chip">${entry.currency}: ${formatAmount(entry.total)}</span>`;
+      }).join("")
+      : "<p class='card-note'>Пока нет накоплений</p>")
+    : `<span class="savings-total-chip">${currencyFilter}: ${formatAmount(totals.total)}</span>`;
+
+  const cardsHtml = filtered.length
+    ? filtered.map(renderSavingsCard).join("")
+    : `<article class="glass glass-card placeholder"><div><h2>Пока нет накоплений</h2><p class="card-note">Создайте первый счёт или цель</p></div></article>`;
+
+  return `
+    <section class="tab-view" data-view="savings">
+      <article class="glass glass-card">
+        <div class="section-title">
+          <div>
+            <h2>Накопления</h2>
+            <p class="card-note">Отдельно от операций</p>
+          </div>
+          <button class="btn-brand btn-small" type="button" data-action="open-savings-create">Создать накопление</button>
+        </div>
+
+        <div class="savings-filters">
+          <div class="field">
+            <label for="savings-currency-filter">Валюта</label>
+            <select id="savings-currency-filter">
+              <option value="all" ${currencyFilter === "all" ? "selected" : ""}>Все валюты</option>
+              ${savingsCurrencyFilterOptions(currencyFilter)}
+            </select>
+          </div>
+          <div class="chips" role="group" aria-label="Фильтр накоплений">
+            <button type="button" data-action="set-savings-kind-filter" data-value="all" class="${kindFilter === "all" ? "active" : ""}">Все</button>
+            <button type="button" data-action="set-savings-kind-filter" data-value="account" class="${kindFilter === "account" ? "active" : ""}">Счета</button>
+            <button type="button" data-action="set-savings-kind-filter" data-value="goal" class="${kindFilter === "goal" ? "active" : ""}">Цели</button>
+          </div>
+          <div class="savings-summary">
+            <label>Итого</label>
+            <div class="savings-total-list">${totalsHtml}</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h3>Список накоплений</h3>
+          <p class="card-note">${filtered.length} шт.</p>
+        </div>
+        <div class="savings-list">${cardsHtml}</div>
+      </article>
+    </section>
+  `;
+}
+
+function renderSavingsCard(item) {
+  if (item.kind === "account") {
+    return `
+      <div class="savings-card">
+        <div class="savings-head">
+          <div>
+            <p class="savings-name">${escapeHtml(item.name)}</p>
+            <div class="savings-meta">
+              <span class="savings-tag">Счёт</span>
+              <span class="savings-tag">${item.currency}</span>
+            </div>
+          </div>
+          <div class="savings-balance">${formatAmount(item.balance)} ${item.currency}</div>
+        </div>
+        <p class="card-note">Баланс: ${formatAmount(item.balance)} ${item.currency}</p>
+        <div class="savings-actions">
+          <button class="btn-secondary btn-small" type="button" data-action="savings-add" data-id="${item.id}">Пополнить</button>
+          <button class="btn-secondary btn-small" type="button" data-action="savings-withdraw" data-id="${item.id}">Снять</button>
+          <button class="btn-secondary btn-small" type="button" data-action="edit-savings" data-id="${item.id}">Изменить</button>
+          <button class="btn-danger btn-small" type="button" data-action="delete-savings" data-id="${item.id}">Удалить</button>
+        </div>
+      </div>
+    `;
+  }
+
+  const balancesMap = normalizeGoalBalancesMap(item.balances);
+  const progressInfo = computeGoalProgress(item);
+  const balancesEntries = Object.entries(balancesMap)
+    .filter(([, amount]) => amount > 0)
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  const balancesHtml = balancesEntries.length
+    ? balancesEntries.map(([currency, amount]) => `<span class="savings-tag">${currency}: ${formatAmount(amount)}</span>`).join("")
+    : `<span class="savings-tag">${item.baseCurrency || item.targetCurrency}: 0</span>`;
+  const progress = progressInfo.canCompute ? progressInfo.percent : 0;
+  const deadlineLine = item.deadline ? `<p class="card-note">До: ${formatDate(item.deadline)}</p>` : "";
+  const progressLine = progressInfo.canCompute
+    ? `<p class="card-note">${formatAmount(progress)}%</p>`
+    : `<p class="card-note">Прогресс: —</p>`;
+  const missingRatesLine = progressInfo.missingRateCurrencies.length
+    ? `<p class="card-note">Не учтено без курса: ${progressInfo.missingRateCurrencies.join(", ")}</p>`
+    : "";
+  const targetBaseLine = progressInfo.targetInBase !== null
+    ? `<p class="card-note">Цель в ${progressInfo.baseCurrency}: ${formatAmount(progressInfo.targetInBase)} ${progressInfo.baseCurrency}</p>`
+    : `<p class="card-note">Нет курса для валюты цели</p>`;
+
+  return `
+    <div class="savings-card">
+      <div class="savings-head">
+        <div>
+          <p class="savings-name">${escapeHtml(item.name)}</p>
+          <div class="savings-meta">
+            <span class="savings-tag">Цель</span>
+            <span class="savings-tag">Целевая: ${item.targetCurrency}</span>
+          </div>
+        </div>
+        <div class="savings-balance">${formatAmount(progressInfo.totalInBase)} ${progressInfo.baseCurrency}</div>
+      </div>
+      <div class="savings-goal-lines">
+        <p class="card-note">Балансы:</p>
+        <div class="savings-meta">${balancesHtml}</div>
+        <p class="card-note">Целевая: ${formatAmount(item.target)} ${item.targetCurrency}</p>
+        <p class="card-note">Валюта прогресса: ${progressInfo.baseCurrency}</p>
+        <p class="card-note">Посчитано: ${formatAmount(progressInfo.totalInBase)} ${progressInfo.baseCurrency}</p>
+        ${targetBaseLine}
+        ${missingRatesLine}
+        <div class="progress-track"><div class="progress-fill" style="width:${progress}%;"></div></div>
+        ${progressLine}
+        ${deadlineLine}
+      </div>
+      <div class="savings-actions">
+        <button class="btn-secondary btn-small" type="button" data-action="savings-add" data-id="${item.id}">Добавить</button>
+        <button class="btn-secondary btn-small" type="button" data-action="savings-withdraw" data-id="${item.id}">Снять</button>
+        <button class="btn-secondary btn-small" type="button" data-action="edit-savings-rates" data-id="${item.id}">Курсы</button>
+        <button class="btn-secondary btn-small" type="button" data-action="edit-savings" data-id="${item.id}">Изменить цель</button>
+        <button class="btn-danger btn-small" type="button" data-action="delete-savings" data-id="${item.id}">Удалить</button>
+      </div>
+    </div>
   `;
 }
 
@@ -1065,6 +1291,429 @@ function addBudgetFromModal(formData) {
   showToast("Бюджет сохранен");
 }
 
+function openSavingsModal(mode = "create", id = "", focusSection = "") {
+  const isEdit = mode === "edit";
+  const existing = isEdit ? state.savings.find((item) => item.id === id) : null;
+  if (isEdit && !existing) {
+    showToast("Накопление не найдено");
+    return;
+  }
+
+  const initial = existing || {
+    id: "",
+    kind: "account",
+    name: "",
+    currency: state.settings.defaultCurrency,
+    balance: 0,
+    target: 0,
+    targetCurrency: state.settings.defaultCurrency,
+    baseCurrency: state.settings.defaultCurrency,
+    deadline: "",
+    balances: {},
+    ratesToBase: {},
+    createdAt: dateISO(new Date())
+  };
+  const isGoal = initial.kind === "goal";
+  const goalBalances = isGoal ? normalizeGoalBalancesMap(initial.balances) : {};
+  const goalBaseCurrency = sanitizeCurrency(
+    initial.baseCurrency,
+    sanitizeCurrency(initial.targetCurrency, state.settings.defaultCurrency)
+  );
+  const goalRates = isGoal ? normalizeGoalRatesMap(initial.ratesToBase) : {};
+  const rateCurrencies = isGoal
+    ? Array.from(new Set([
+      ...Object.keys(goalBalances),
+      ...Object.keys(goalRates),
+      sanitizeCurrency(initial.targetCurrency, state.settings.defaultCurrency)
+    ].filter(Boolean)))
+    : [...CURRENCIES];
+  const goalRatesRows = rateCurrencies
+    .map((currency) => {
+      const isBase = currency === goalBaseCurrency;
+      const rateValue = Number(goalRates[currency]);
+      const hasRate = Number.isFinite(rateValue) && rateValue > 0;
+      return `
+        <div class="grid-2 savings-rate-row">
+          <div class="field">
+            <label>${currency}</label>
+            <input type="text" value="${currency}" disabled />
+          </div>
+          <div class="field">
+            <label class="savings-rate-label" data-currency="${currency}">Курс: 1 ${currency} = ___ ${goalBaseCurrency}</label>
+            <input
+              data-rate-input="${currency}"
+              name="rate_${currency}"
+              type="text"
+              inputmode="decimal"
+              placeholder="${isBase ? "Не требуется" : `1 ${currency} = ? ${goalBaseCurrency}`}"
+              value="${isBase ? "" : (hasRate ? formatAmount(rateValue) : "")}"
+              ${isBase ? "disabled" : ""}
+            />
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+  const accountBlockClass = isGoal ? "hidden" : "";
+  const goalBlockClass = isGoal ? "" : "hidden";
+  const kindControl = isEdit
+    ? `<input type="hidden" name="kind" value="${initial.kind}" /><p class="card-note">Тип: ${initial.kind === "goal" ? "Цель" : "Счёт"}</p>`
+    : `
+      <div class="field">
+        <label for="savings-kind">Тип</label>
+        <select id="savings-kind" name="kind">
+          <option value="account" ${initial.kind === "account" ? "selected" : ""}>Счёт</option>
+          <option value="goal" ${initial.kind === "goal" ? "selected" : ""}>Цель</option>
+        </select>
+      </div>
+    `;
+  const modalTitle = isEdit
+    ? (isGoal ? "Изменить цель" : "Изменить счёт")
+    : "Создать накопление";
+
+  modalRoot.innerHTML = `
+    <div class="modal glass" role="dialog" aria-modal="true" aria-label="${modalTitle}">
+      <div class="modal-head">
+        <h2>${modalTitle}</h2>
+        <button class="btn-secondary" data-action="close-modal" type="button">Отмена</button>
+      </div>
+      <form class="form-grid" data-form="savings-edit">
+        <input type="hidden" name="mode" value="${isEdit ? "edit" : "create"}" />
+        <input type="hidden" name="id" value="${escapeHtml(initial.id)}" />
+        ${kindControl}
+
+        <div class="field">
+          <label for="savings-name">Название</label>
+          <input id="savings-name" name="name" type="text" placeholder="Например: Резерв" value="${escapeHtml(initial.name)}" />
+        </div>
+
+        <div id="savings-account-fields" class="${accountBlockClass}">
+          <div class="grid-2">
+            <div class="field">
+              <label for="savings-currency">Валюта</label>
+              <select id="savings-currency" name="currency">${currencyOptions(initial.currency)}</select>
+            </div>
+            <div class="field">
+              <label for="savings-balance">Баланс</label>
+              <input id="savings-balance" name="balance" type="text" inputmode="decimal" value="${formatAmount(initial.balance)}" />
+            </div>
+          </div>
+        </div>
+
+        <div id="savings-goal-fields" class="savings-modal-goal ${goalBlockClass}">
+          <div class="field">
+            <label for="savings-target">Цель</label>
+            <input id="savings-target" name="target" type="text" inputmode="decimal" value="${initial.target ? formatAmount(initial.target) : ""}" />
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label for="savings-target-currency">Целевая валюта</label>
+              <select id="savings-target-currency" name="targetCurrency">${currencyOptions(initial.targetCurrency || state.settings.defaultCurrency)}</select>
+            </div>
+            <div class="field">
+              <label for="savings-base-currency">Валюта прогресса</label>
+              <select id="savings-base-currency" name="baseCurrency">${currencyOptions(goalBaseCurrency)}</select>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label for="savings-deadline">Срок (необязательно)</label>
+              <input id="savings-deadline" name="deadline" type="date" value="${initial.deadline || ""}" />
+            </div>
+          </div>
+          <div class="savings-rates-block" id="savings-rates-block">
+            <p class="card-note">Ручные курсы к валюте прогресса</p>
+            ${goalRatesRows || "<p class='card-note'>Добавьте баланс в валюте или выберите валюту цели</p>"}
+          </div>
+          ${isGoal ? `<p class="card-note">Балансы: ${Object.entries(goalBalances).map(([cur, val]) => `${cur} ${formatAmount(val)}`).join(" · ") || "—"}</p>` : ""}
+        </div>
+
+        <button class="btn-brand" type="submit">Сохранить</button>
+      </form>
+    </div>
+  `;
+
+  const kindSelect = modalRoot.querySelector("#savings-kind");
+  if (kindSelect) {
+    const goalFields = modalRoot.querySelector("#savings-goal-fields");
+    const accountFields = modalRoot.querySelector("#savings-account-fields");
+    kindSelect.addEventListener("change", () => {
+      const isGoalSelected = kindSelect.value === "goal";
+      goalFields.classList.toggle("hidden", !isGoalSelected);
+      accountFields.classList.toggle("hidden", isGoalSelected);
+    });
+  }
+
+  const baseCurrencySelect = modalRoot.querySelector("#savings-base-currency");
+  if (baseCurrencySelect) {
+    const updateRateLabels = () => {
+      const base = sanitizeCurrency(baseCurrencySelect.value, state.settings.defaultCurrency);
+      modalRoot.querySelectorAll(".savings-rate-label").forEach((label) => {
+        const cur = label.getAttribute("data-currency") || "";
+        label.textContent = `Курс: 1 ${cur} = ___ ${base}`;
+      });
+      modalRoot.querySelectorAll("[data-rate-input]").forEach((input) => {
+        const cur = input.getAttribute("data-rate-input") || "";
+        const isBase = cur === base;
+        input.disabled = isBase;
+        input.placeholder = isBase ? "Не требуется" : `1 ${cur} = ? ${base}`;
+        if (isBase) {
+          input.value = "";
+        }
+      });
+    };
+    baseCurrencySelect.addEventListener("change", updateRateLabels);
+    updateRateLabels();
+  }
+
+  modalRoot.classList.remove("hidden");
+  modalRoot.setAttribute("aria-hidden", "false");
+
+  if (focusSection === "rates") {
+    const firstRateInput = modalRoot.querySelector("[data-rate-input]:not([disabled])");
+    if (firstRateInput) {
+      firstRateInput.focus();
+      firstRateInput.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+}
+
+function submitSavingsModal(formData) {
+  const mode = String(formData.get("mode") || "create");
+  const id = String(formData.get("id") || "");
+  const kind = sanitizeSavingsKind(formData.get("kind"));
+  const name = String(formData.get("name") || "").trim();
+  const currency = sanitizeCurrency(formData.get("currency"), state.settings.defaultCurrency);
+  const balance = parseNumber(formData.get("balance"));
+  const targetRaw = parseNumber(formData.get("target"));
+  const targetCurrency = sanitizeCurrency(formData.get("targetCurrency"), state.settings.defaultCurrency);
+  const baseCurrency = sanitizeCurrency(formData.get("baseCurrency"), targetCurrency || state.settings.defaultCurrency);
+  const deadline = sanitizeOptionalDateISO(formData.get("deadline"));
+  const ratesToBase = parseGoalRatesFromForm(formData, baseCurrency);
+
+  if (!name) {
+    showToast("Введите название");
+    return;
+  }
+  if (kind === "account") {
+    if (!Number.isFinite(balance) || balance < 0) {
+      showToast("Баланс должен быть 0 или больше");
+      return;
+    }
+  } else {
+    if (!Number.isFinite(targetRaw) || targetRaw <= 0) {
+      showToast("Для цели укажите сумму больше 0");
+      return;
+    }
+    if (!ratesToBase.ok) {
+      showToast(ratesToBase.message);
+      return;
+    }
+  }
+
+  const payload = {
+    kind,
+    name,
+    currency,
+    balance: Number.isFinite(balance) ? balance : 0,
+    target: kind === "goal" ? targetRaw : null,
+    targetCurrency: kind === "goal" ? targetCurrency : null,
+    baseCurrency: kind === "goal" ? baseCurrency : null,
+    deadline: kind === "goal" ? deadline : "",
+    balances: {},
+    ratesToBase: kind === "goal" ? ratesToBase.value : {}
+  };
+
+  if (mode === "edit") {
+    updateSavingsItem(id, payload);
+    showToast("Накопление обновлено");
+  } else {
+    createSavingsItem(payload);
+    showToast("Накопление создано");
+  }
+
+  closeModal();
+  render();
+}
+
+function createSavingsItem(data) {
+  const kind = sanitizeSavingsKind(data.kind);
+  const safeTargetCurrency = sanitizeCurrency(data.targetCurrency, state.settings.defaultCurrency);
+  const safeBaseCurrency = sanitizeCurrency(data.baseCurrency, safeTargetCurrency || state.settings.defaultCurrency);
+  const item = {
+    id: uid("sav"),
+    kind,
+    name: String(data.name || "").trim(),
+    currency: sanitizeCurrency(data.currency, state.settings.defaultCurrency),
+    balance: Number.isFinite(data.balance) ? Math.max(0, data.balance) : 0,
+    target: kind === "goal" && Number.isFinite(data.target) && data.target > 0 ? data.target : null,
+    targetCurrency: kind === "goal" ? safeTargetCurrency : null,
+    baseCurrency: kind === "goal" ? safeBaseCurrency : null,
+    deadline: sanitizeOptionalDateISO(data.deadline),
+    balances: kind === "goal" ? normalizeGoalBalancesMap(data.balances) : undefined,
+    ratesToBase: kind === "goal" ? normalizeGoalRatesMap(data.ratesToBase) : undefined,
+    createdAt: dateISO(new Date())
+  };
+  if (kind !== "goal") {
+    item.target = null;
+    item.targetCurrency = null;
+    item.baseCurrency = null;
+    item.deadline = "";
+    delete item.balances;
+    delete item.ratesToBase;
+  } else if (!item.balances || Object.keys(item.balances).length === 0) {
+    item.balances = {};
+  }
+  state.savings.push(item);
+  saveSavings();
+}
+
+function updateSavingsItem(id, data) {
+  const item = state.savings.find((entry) => entry.id === id);
+  if (!item) {
+    showToast("Накопление не найдено");
+    return;
+  }
+  const kind = sanitizeSavingsKind(data.kind || item.kind);
+  item.kind = kind;
+  item.name = String(data.name || "").trim();
+  if (kind === "account") {
+    item.currency = sanitizeCurrency(data.currency, item.currency || state.settings.defaultCurrency);
+    item.balance = Number.isFinite(data.balance) ? Math.max(0, data.balance) : 0;
+    item.target = null;
+    item.targetCurrency = null;
+    item.baseCurrency = null;
+    item.deadline = "";
+    delete item.balances;
+    delete item.ratesToBase;
+  } else {
+    item.target = Number.isFinite(data.target) && data.target > 0 ? data.target : Math.max(1, Number(item.target) || 1);
+    item.targetCurrency = sanitizeCurrency(data.targetCurrency, item.targetCurrency || state.settings.defaultCurrency);
+    item.baseCurrency = sanitizeCurrency(
+      data.baseCurrency,
+      item.baseCurrency || item.targetCurrency || state.settings.defaultCurrency
+    );
+    item.deadline = sanitizeOptionalDateISO(data.deadline);
+    item.balances = normalizeGoalBalancesMap(item.balances);
+    item.ratesToBase = normalizeGoalRatesMap(data.ratesToBase || item.ratesToBase);
+    delete item.currency;
+    delete item.balance;
+  }
+  saveSavings();
+}
+
+function openSavingsFundsModal(id, operation) {
+  const item = state.savings.find((entry) => entry.id === id);
+  if (!item) {
+    showToast("Накопление не найдено");
+    return;
+  }
+  const op = operation === "withdraw" ? "withdraw" : "add";
+  const opLabel = op === "withdraw" ? "Снять" : "Добавить";
+  const title = `${opLabel}: ${item.name}`;
+
+  let currencyControl = "";
+  if (item.kind === "account") {
+    currencyControl = `
+      <div class="field">
+        <label>Валюта</label>
+        <input type="text" value="${item.currency}" disabled />
+        <input type="hidden" name="currency" value="${item.currency}" />
+      </div>
+    `;
+  } else {
+    const balances = normalizeGoalBalancesMap(item.balances);
+    const existing = Object.keys(balances).filter((cur) => CURRENCIES.includes(cur));
+    const ordered = [...existing, ...CURRENCIES.filter((cur) => !existing.includes(cur))];
+    const defaultCurrency = item.targetCurrency && CURRENCIES.includes(item.targetCurrency) ? item.targetCurrency : CURRENCIES[0];
+    currencyControl = `
+      <div class="field">
+        <label for="savings-funds-currency">Валюта</label>
+        <select id="savings-funds-currency" name="currency">
+          ${ordered.map((cur) => `<option value="${cur}" ${cur === defaultCurrency ? "selected" : ""}>${cur}</option>`).join("")}
+        </select>
+      </div>
+    `;
+  }
+
+  modalRoot.innerHTML = `
+    <div class="modal glass" role="dialog" aria-modal="true" aria-label="${title}">
+      <div class="modal-head">
+        <h2>${title}</h2>
+        <button class="btn-secondary" data-action="close-modal" type="button">Отмена</button>
+      </div>
+      <form class="form-grid" data-form="savings-funds">
+        <input type="hidden" name="id" value="${item.id}" />
+        <input type="hidden" name="operation" value="${op}" />
+        <div class="field">
+          <label for="savings-funds-amount">Сумма</label>
+          <input id="savings-funds-amount" name="amount" type="text" inputmode="decimal" placeholder="0,00" />
+        </div>
+        ${currencyControl}
+        <button class="btn-brand" type="submit">${opLabel}</button>
+      </form>
+    </div>
+  `;
+
+  modalRoot.classList.remove("hidden");
+  modalRoot.setAttribute("aria-hidden", "false");
+}
+
+function submitSavingsFunds(formData) {
+  const id = String(formData.get("id") || "");
+  const operation = String(formData.get("operation") || "add");
+  const amount = parseNumber(formData.get("amount"));
+  const currency = sanitizeCurrency(formData.get("currency"), state.settings.defaultCurrency);
+  const item = state.savings.find((entry) => entry.id === id);
+
+  if (!item) {
+    showToast("Накопление не найдено");
+    return;
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    showToast("Введите сумму больше 0");
+    return;
+  }
+
+  const isWithdraw = operation === "withdraw";
+  if (item.kind === "account") {
+    const next = isWithdraw ? item.balance - amount : item.balance + amount;
+    if (next < 0) {
+      showToast("Недостаточно средств");
+      return;
+    }
+    item.balance = next;
+  } else {
+    item.balances = normalizeGoalBalancesMap(item.balances);
+    const current = Number(item.balances[currency] || 0);
+    const next = isWithdraw ? current - amount : current + amount;
+    if (next < 0) {
+      showToast("Недостаточно средств");
+      return;
+    }
+    item.balances[currency] = next;
+  }
+
+  saveSavings();
+  closeModal();
+  render();
+  showToast(isWithdraw ? "Средства списаны" : "Средства добавлены");
+}
+
+function deleteSavingsItem(id) {
+  const item = state.savings.find((entry) => entry.id === id);
+  if (!item) {
+    return;
+  }
+  if (!window.confirm(`Удалить «${item.name}»?`)) {
+    return;
+  }
+  state.savings = state.savings.filter((entry) => entry.id !== id);
+  saveSavings();
+  render();
+  showToast("Накопление удалено");
+}
+
 function openManageCategoriesModal(prefillType = "expense", prefillName = "") {
   const expense = getCategoriesByType("expense");
   const income = getCategoriesByType("income");
@@ -1429,6 +2078,76 @@ function normalizeRecurring(raw, categoriesMap) {
     .filter(Boolean);
 }
 
+function loadSavings() {
+  const rawSavings = readJSON(STORAGE_KEYS.savings, []);
+  return normalizeSavings(rawSavings, state.settings.defaultCurrency);
+}
+
+function normalizeSavings(raw, fallbackCurrency = DEFAULT_SETTINGS.defaultCurrency) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+
+      const kind = sanitizeSavingsKind(item.kind);
+      const name = String(item.name || "").trim();
+      if (!name) {
+        return null;
+      }
+
+      if (kind === "account") {
+        const balance = parseNumber(item.balance);
+        const normalizedBalance = Number.isFinite(balance) && balance >= 0 ? balance : 0;
+        return {
+          id: String(item.id || uid("sav")),
+          kind: "account",
+          name,
+          currency: sanitizeCurrency(item.currency, fallbackCurrency || DEFAULT_SETTINGS.defaultCurrency),
+          balance: normalizedBalance,
+          createdAt: sanitizeDateISO(item.createdAt)
+        };
+      }
+
+      const migratedCurrency = sanitizeCurrency(
+        item.currency || item.targetCurrency,
+        fallbackCurrency || DEFAULT_SETTINGS.defaultCurrency
+      );
+      const migratedBalance = parseNumber(item.balance);
+      const migratedBalanceSafe = Number.isFinite(migratedBalance) && migratedBalance >= 0 ? migratedBalance : 0;
+      const balances = normalizeGoalBalancesMap(item.balances);
+      if (migratedBalanceSafe > 0 || (item.currency && !Object.prototype.hasOwnProperty.call(balances, migratedCurrency))) {
+        balances[migratedCurrency] = Math.max(Number(balances[migratedCurrency] || 0), migratedBalanceSafe);
+      }
+
+      const targetRaw = parseNumber(item.target);
+      const target = Number.isFinite(targetRaw) && targetRaw > 0 ? targetRaw : 1;
+      const targetCurrency = sanitizeCurrency(
+        item.targetCurrency || item.currency,
+        fallbackCurrency || DEFAULT_SETTINGS.defaultCurrency
+      );
+      const baseCurrency = sanitizeCurrency(item.baseCurrency, targetCurrency || fallbackCurrency || DEFAULT_SETTINGS.defaultCurrency);
+      const ratesToBase = normalizeGoalRatesMap(item.ratesToBase);
+
+      return {
+        id: String(item.id || uid("sav")),
+        kind: "goal",
+        name,
+        target,
+        targetCurrency,
+        baseCurrency,
+        deadline: sanitizeOptionalDateISO(item.deadline),
+        balances,
+        ratesToBase,
+        createdAt: sanitizeDateISO(item.createdAt)
+      };
+    })
+    .filter(Boolean);
+}
+
 function applyRecurringTransactions() {
   const today = dateISO(new Date());
   let hasChanges = false;
@@ -1500,7 +2219,8 @@ function exportJsonToTextarea() {
     categories: state.categories,
     transactions: state.transactions,
     budgets: state.budgets,
-    recurring: state.recurring
+    recurring: state.recurring,
+    savings: state.savings
   };
 
   state.ui.ioText = JSON.stringify(payload, null, 2);
@@ -1544,6 +2264,7 @@ function importJsonFromTextarea() {
   state.transactions = result.transactions;
   state.budgets = result.budgets;
   state.recurring = result.recurring;
+  state.savings = result.savings;
 
   ensureDataIntegrity();
   saveAll();
@@ -1578,8 +2299,12 @@ function validateImportedPayload(payload) {
     Array.isArray(payload.recurring) ? payload.recurring : [],
     categoriesMap
   );
+  const savings = normalizeSavings(
+    Array.isArray(payload.savings) ? payload.savings : [],
+    settings.defaultCurrency
+  );
 
-  return { ok: true, settings, categories, transactions, budgets, recurring };
+  return { ok: true, settings, categories, transactions, budgets, recurring, savings };
 }
 
 function resetAllData() {
@@ -1591,6 +2316,7 @@ function resetAllData() {
   state.transactions = [];
   state.budgets = [];
   state.recurring = [];
+  state.savings = [];
   state.categories = seedDefaultCategories();
   state.settings = { ...DEFAULT_SETTINGS };
   state.ui.reportCurrency = state.settings.defaultCurrency;
@@ -1938,6 +2664,7 @@ function loadAll() {
   state.transactions = normalizeTransactions(rawTransactions, categoriesMap);
   state.budgets = normalizeBudgets(rawBudgets, categoriesMap);
   state.recurring = normalizeRecurring(rawRecurring, categoriesMap);
+  state.savings = loadSavings();
 
   ensureDataIntegrity();
   applyRecurringTransactions();
@@ -1983,6 +2710,7 @@ function saveAll() {
   saveBudgets();
   saveSettings();
   saveRecurring();
+  saveSavings();
 }
 
 function saveTransactions() {
@@ -2003,6 +2731,10 @@ function saveSettings() {
 
 function saveRecurring() {
   writeJSON(STORAGE_KEYS.recurring, state.recurring);
+}
+
+function saveSavings() {
+  writeJSON(STORAGE_KEYS.savings, state.savings);
 }
 
 function seedDefaultCategories() {
@@ -2229,6 +2961,13 @@ function currencyOptions(selected) {
   }).join("");
 }
 
+function savingsCurrencyFilterOptions(selected) {
+  return CURRENCIES.map((currency) => {
+    const isSelected = selected !== "all" && currency === selected;
+    return `<option value="${currency}" ${isSelected ? "selected" : ""}>${currency}</option>`;
+  }).join("");
+}
+
 function categoryOptions(type, selectedId) {
   return getCategoriesByType(type)
     .map((cat) => `<option value="${cat.id}" ${cat.id === selectedId ? "selected" : ""}>${escapeHtml(cat.name)}</option>`)
@@ -2267,6 +3006,21 @@ function sanitizeType(value) {
   return value === "income" ? "income" : "expense";
 }
 
+function sanitizeSavingsKind(value) {
+  return value === "goal" ? "goal" : "account";
+}
+
+function sanitizeSavingsKindFilter(value) {
+  if (value === "account" || value === "goal") {
+    return value;
+  }
+  return "all";
+}
+
+function sanitizeSavingsCurrencyFilter(value) {
+  return value === "all" ? "all" : sanitizeCurrency(value, "all");
+}
+
 function sanitizeCurrency(value, fallback) {
   const code = String(value || "").toUpperCase();
   return CURRENCIES.includes(code) ? code : fallback;
@@ -2275,6 +3029,14 @@ function sanitizeCurrency(value, fallback) {
 function sanitizeDateISO(value) {
   const str = String(value || "");
   return /^\d{4}-\d{2}-\d{2}$/.test(str) ? str : dateISO(new Date());
+}
+
+function sanitizeOptionalDateISO(value) {
+  const str = String(value || "");
+  if (!str) {
+    return "";
+  }
+  return /^\d{4}-\d{2}-\d{2}$/.test(str) ? str : "";
 }
 
 function sanitizeMonthKey(value, fallback) {
@@ -2363,6 +3125,120 @@ function getCategoryHoverColor(index, total) {
   return adjustHexColor(base, 12);
 }
 
+function normalizeGoalBalancesMap(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") {
+    return out;
+  }
+  Object.entries(raw).forEach(([currency, value]) => {
+    const cur = sanitizeCurrency(currency, "");
+    if (!cur) {
+      return;
+    }
+    const amount = parseNumber(value);
+    out[cur] = Number.isFinite(amount) && amount >= 0 ? amount : 0;
+  });
+  return out;
+}
+
+function normalizeGoalRatesMap(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") {
+    return out;
+  }
+  Object.entries(raw).forEach(([currency, value]) => {
+    const cur = sanitizeCurrency(currency, "");
+    if (!cur) {
+      return;
+    }
+    const rate = parseNumber(value);
+    if (Number.isFinite(rate) && rate > 0) {
+      out[cur] = rate;
+    }
+  });
+  return out;
+}
+
+function parseGoalRatesFromForm(formData, baseCurrency) {
+  const rates = {};
+  for (const currency of CURRENCIES) {
+    if (currency === baseCurrency) {
+      continue;
+    }
+    const raw = String(formData.get(`rate_${currency}`) || "").trim();
+    if (!raw) {
+      continue;
+    }
+    const rate = parseNumber(raw);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      return { ok: false, message: `Некорректный курс для ${currency}` };
+    }
+    rates[currency] = rate;
+  }
+  return { ok: true, value: rates };
+}
+
+function computeGoalProgress(goal) {
+  const targetCurrency = sanitizeCurrency(
+    goal && goal.targetCurrency,
+    state.settings.defaultCurrency
+  );
+  const baseCurrency = sanitizeCurrency(
+    goal && goal.baseCurrency,
+    targetCurrency || state.settings.defaultCurrency
+  );
+  const balances = normalizeGoalBalancesMap(goal && goal.balances);
+  const rates = normalizeGoalRatesMap(goal && goal.ratesToBase);
+  const missingRateCurrencies = [];
+  let totalInBase = 0;
+
+  Object.entries(balances).forEach(([currency, rawAmount]) => {
+    const amount = Number.isFinite(rawAmount) ? Math.max(0, rawAmount) : 0;
+    if (amount <= 0) {
+      return;
+    }
+    if (currency === baseCurrency) {
+      totalInBase += amount;
+      return;
+    }
+    const rate = Number(rates[currency]);
+    if (Number.isFinite(rate) && rate > 0) {
+      totalInBase += amount * rate;
+    } else {
+      missingRateCurrencies.push(currency);
+    }
+  });
+
+  const safeTarget = Number.isFinite(Number(goal && goal.target)) && Number(goal.target) > 0
+    ? Number(goal.target)
+    : 0;
+  let targetInBase = null;
+
+  if (safeTarget > 0) {
+    if (targetCurrency === baseCurrency) {
+      targetInBase = safeTarget;
+    } else {
+      const targetRate = Number(rates[targetCurrency]);
+      if (Number.isFinite(targetRate) && targetRate > 0) {
+        targetInBase = safeTarget * targetRate;
+      }
+    }
+  }
+
+  const canCompute = Number.isFinite(targetInBase) && targetInBase > 0;
+  const percent = canCompute ? Math.min(100, (totalInBase / targetInBase) * 100) : 0;
+
+  return {
+    baseCurrency,
+    targetCurrency,
+    totalInBase,
+    targetInBase: canCompute ? targetInBase : null,
+    percent,
+    canCompute,
+    missingRateCurrencies
+  };
+}
+
 function adjustHexColor(hex, delta) {
   const safeHex = String(hex || "").replace("#", "");
   if (!/^[0-9a-fA-F]{6}$/.test(safeHex)) {
@@ -2390,6 +3266,35 @@ function allCategoriesOptions(selectedId) {
       return `<option value="${cat.id}" ${cat.id === selectedId ? "selected" : ""}>${prefix}: ${escapeHtml(cat.name)}</option>`;
     })
     .join("");
+}
+
+function computeSavingsTotals(list, currencyFilter) {
+  if (currencyFilter !== "all") {
+    const total = list.reduce((sum, item) => {
+      if (item.kind === "account") {
+        return sum + (item.currency === currencyFilter ? Number(item.balance || 0) : 0);
+      }
+      const balances = normalizeGoalBalancesMap(item.balances);
+      return sum + Number(balances[currencyFilter] || 0);
+    }, 0);
+    return { total, byCurrency: [] };
+  }
+
+  const map = new Map();
+  list.forEach((item) => {
+    if (item.kind === "account") {
+      map.set(item.currency, (map.get(item.currency) || 0) + Number(item.balance || 0));
+      return;
+    }
+    const balances = normalizeGoalBalancesMap(item.balances);
+    Object.entries(balances).forEach(([currency, amount]) => {
+      map.set(currency, (map.get(currency) || 0) + amount);
+    });
+  });
+  const byCurrency = Array.from(map.entries())
+    .map(([currency, total]) => ({ currency, total }))
+    .sort((a, b) => a.currency.localeCompare(b.currency));
+  return { total: 0, byCurrency };
 }
 
 function groupTransactionsByDate(transactions) {
