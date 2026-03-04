@@ -186,6 +186,17 @@ function onViewClick(event) {
     setBudget(month, categoryId, currency, 0);
     render();
     showToast("Бюджет очищен");
+    return;
+  }
+
+  if (target.matches("[data-action='open-budget-category-modal']")) {
+    openBudgetCategoryModal();
+    return;
+  }
+
+  if (target.matches("[data-action='open-new-category']")) {
+    const type = sanitizeType(target.dataset.type || state.ui.addType);
+    openManageCategoriesModal(type, "");
   }
 }
 
@@ -289,6 +300,14 @@ function onModalClick(event) {
     return;
   }
 
+  if (target.matches("[data-action='category-rename']")) {
+    const id = target.dataset.id;
+    if (id) {
+      renameCategory(id);
+    }
+    return;
+  }
+
   if (target.matches("[data-action='category-down']")) {
     const id = target.dataset.id;
     if (id) {
@@ -318,6 +337,12 @@ function onModalSubmit(event) {
   if (form.matches("[data-form='recurring-add']")) {
     const formData = new FormData(form);
     addRecurringRule(formData);
+    return;
+  }
+
+  if (form.matches("[data-form='budget-add']")) {
+    const formData = new FormData(form);
+    addBudgetFromModal(formData);
   }
 }
 
@@ -401,6 +426,14 @@ function buildAddTab() {
           <div class="field">
             <label for="add-category">Категория</label>
             <select id="add-category">${categoryOptions(state.ui.addType, "")}</select>
+            <div class="toolbar-row">
+              <button
+                class="btn-secondary btn-small"
+                type="button"
+                data-action="open-new-category"
+                data-type="${state.ui.addType}"
+              >+ Новая</button>
+            </div>
           </div>
 
           <div class="grid-2">
@@ -550,6 +583,7 @@ function buildBudgetsTab() {
       <article class="glass glass-card">
         <div class="section-title">
           <h2>Бюджеты по категориям</h2>
+          <button class="btn-secondary btn-small" type="button" data-action="open-new-category" data-type="expense">Создать категорию</button>
         </div>
 
         <div class="budget-filters">
@@ -958,6 +992,79 @@ function spentByCategory(monthKey, currency, categoryId) {
     .reduce((sum, tx) => sum + tx.amount, 0);
 }
 
+function openBudgetCategoryModal() {
+  const month = state.ui.budgetsMonth;
+  const currency = state.ui.reportCurrency;
+  const expenseCategories = getCategoriesByType("expense");
+  const usedCategoryIds = new Set(
+    state.budgets
+      .filter((b) => b.monthKey === month && b.currency === currency)
+      .map((b) => b.categoryId)
+  );
+  const available = expenseCategories.filter((cat) => !usedCategoryIds.has(cat.id));
+
+  modalRoot.innerHTML = `
+    <div class="modal glass" role="dialog" aria-modal="true" aria-label="Добавить категорию в бюджеты">
+      <div class="modal-head">
+        <h2>Добавить категорию в бюджеты</h2>
+        <button class="btn-secondary" data-action="close-modal" type="button">Закрыть</button>
+      </div>
+      <p class="card-note">Месяц: ${month} · Валюта: ${currency}</p>
+      <form class="form-grid" data-form="budget-add">
+        <input type="hidden" name="monthKey" value="${month}" />
+        <input type="hidden" name="currency" value="${currency}" />
+        <div class="field">
+          <label for="budget-add-category">Категория</label>
+          <select id="budget-add-category" name="categoryId" ${available.length ? "" : "disabled"}>
+            ${
+              available.length
+                ? available.map((cat) => `<option value="${cat.id}">${escapeHtml(cat.name)}</option>`).join("")
+                : "<option value=''>Нет доступных категорий</option>"
+            }
+          </select>
+        </div>
+        <div class="field">
+          <label for="budget-add-amount">Бюджет</label>
+          <input id="budget-add-amount" name="amount" type="text" inputmode="decimal" placeholder="0,00" ${available.length ? "" : "disabled"} />
+        </div>
+        <button class="btn-brand" type="submit" ${available.length ? "" : "disabled"}>Сохранить</button>
+      </form>
+    </div>
+  `;
+
+  modalRoot.classList.remove("hidden");
+  modalRoot.setAttribute("aria-hidden", "false");
+}
+
+function addBudgetFromModal(formData) {
+  const monthKey = sanitizeMonthKey(formData.get("monthKey"), state.ui.budgetsMonth);
+  const currency = sanitizeCurrency(formData.get("currency"), state.ui.reportCurrency);
+  const categoryId = String(formData.get("categoryId") || "");
+  const amountRaw = String(formData.get("amount") || "").trim();
+  const amount = parseNumber(amountRaw);
+
+  const category = findCategoryById(categoryId);
+  if (!category || category.type !== "expense") {
+    showToast("Выберите категорию расходов");
+    return;
+  }
+
+  if (!amountRaw || !Number.isFinite(amount) || amount < 0) {
+    showToast("Введите корректную сумму");
+    return;
+  }
+
+  if (amount === 0) {
+    setBudget(monthKey, categoryId, currency, 0);
+  } else {
+    setBudget(monthKey, categoryId, currency, amount);
+  }
+
+  closeModal();
+  render();
+  showToast("Бюджет сохранен");
+}
+
 function openManageCategoriesModal(prefillType = "expense", prefillName = "") {
   const expense = getCategoriesByType("expense");
   const income = getCategoriesByType("income");
@@ -1010,12 +1117,45 @@ function categoryItemTemplate(cat) {
         ${escapeHtml(cat.name)} ${cat.isSystem ? "<span class='tag-system'>системная</span>" : ""}
       </div>
       <div class="category-actions">
+        <button class="btn-secondary btn-small" data-action="category-rename" data-id="${cat.id}" type="button">Переименовать</button>
         <button class="btn-secondary btn-small" data-action="category-up" data-id="${cat.id}" type="button">↑</button>
         <button class="btn-secondary btn-small" data-action="category-down" data-id="${cat.id}" type="button">↓</button>
         <button class="btn-danger btn-small" data-action="category-delete" data-id="${cat.id}" type="button">Удалить</button>
       </div>
     </div>
   `;
+}
+
+function renameCategory(categoryId) {
+  const cat = findCategoryById(categoryId);
+  if (!cat) {
+    return;
+  }
+
+  const nextName = window.prompt("Новое имя категории", cat.name);
+  if (nextName === null) {
+    return;
+  }
+
+  const name = String(nextName).trim();
+  if (!name) {
+    showToast("Название не может быть пустым");
+    return;
+  }
+
+  const duplicate = state.categories.find((item) => {
+    return item.id !== cat.id && item.type === cat.type && normalize(item.name) === normalize(name);
+  });
+  if (duplicate) {
+    showToast("Категория с таким именем уже существует");
+    return;
+  }
+
+  cat.name = name;
+  saveCategories();
+  openManageCategoriesModal(cat.type);
+  render();
+  showToast("Категория переименована");
 }
 
 function addCategory(type, name) {
@@ -1713,8 +1853,9 @@ function initAnalyticsCharts() {
       datasets: [{
         label: `Расходы (${currency})`,
         data: monthlyData,
-        backgroundColor: "rgba(232, 80, 2, 0.75)",
-        borderColor: "rgba(232, 80, 2, 1)",
+        backgroundColor: "#FF6A00",
+        hoverBackgroundColor: "#FF8C2E",
+        borderColor: "#FF7A18",
         borderWidth: 1,
         borderRadius: 8
       }]
@@ -1746,6 +1887,12 @@ function initAnalyticsCharts() {
 
   const donutLabels = Array.from(catTotalsMap.keys());
   const donutData = Array.from(catTotalsMap.values());
+  const donutColors = donutData.length
+    ? donutData.map((_value, index) => getCategoryColor(index, donutData.length))
+    : ["#333333"];
+  const donutHoverColors = donutData.length
+    ? donutData.map((_value, index) => getCategoryHoverColor(index, donutData.length))
+    : ["#4a4a4a"];
 
   categoryChart = new Chart(donutCanvas, {
     type: "doughnut",
@@ -1753,11 +1900,10 @@ function initAnalyticsCharts() {
       labels: donutLabels.length ? donutLabels : ["Нет данных"],
       datasets: [{
         data: donutData.length ? donutData : [1],
-        backgroundColor: donutData.length
-          ? ["#E85002", "#F16001", "#C10801", "#D9C3AB", "#A7A7A7", "#646464", "#333333"]
-          : ["#333333"],
-        borderColor: "rgba(0,0,0,0.3)",
-        borderWidth: 1
+        backgroundColor: donutColors,
+        hoverBackgroundColor: donutHoverColors,
+        borderColor: "rgba(0,0,0,0.42)",
+        borderWidth: 1.25
       }]
     },
     options: {
@@ -2191,6 +2337,49 @@ function getLastMonths(endMonthKey, count) {
   }
 
   return result;
+}
+
+function getCategoryColor(index, total) {
+  const palette = [
+    "#FF6A00",
+    "#FF8C2E",
+    "#FF3B1F",
+    "#FFA24C",
+    "#C10801",
+    "#FFB36B",
+    "#FF7A18"
+  ];
+  if (index < palette.length) {
+    return palette[index];
+  }
+  const base = palette[index % palette.length];
+  const cycle = Math.floor(index / palette.length);
+  const delta = cycle % 2 === 0 ? -8 - cycle * 2 : 8 + cycle * 2;
+  return adjustHexColor(base, delta);
+}
+
+function getCategoryHoverColor(index, total) {
+  const base = getCategoryColor(index, total);
+  return adjustHexColor(base, 12);
+}
+
+function adjustHexColor(hex, delta) {
+  const safeHex = String(hex || "").replace("#", "");
+  if (!/^[0-9a-fA-F]{6}$/.test(safeHex)) {
+    return "#E85002";
+  }
+  const r = clampColor(parseInt(safeHex.slice(0, 2), 16) + delta);
+  const g = clampColor(parseInt(safeHex.slice(2, 4), 16) + delta);
+  const b = clampColor(parseInt(safeHex.slice(4, 6), 16) + delta);
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function clampColor(value) {
+  return Math.max(0, Math.min(255, value));
+}
+
+function toHex(value) {
+  return value.toString(16).padStart(2, "0");
 }
 
 function allCategoriesOptions(selectedId) {
