@@ -1,0 +1,2275 @@
+const TAB_IDS = ["add", "transactions", "analytics", "budgets", "settings"];
+const CURRENCIES = ["UAH", "USD", "EUR", "PLN", "GEL"];
+
+const STORAGE_KEYS = {
+  transactions: "ft_v1_transactions",
+  categories: "ft_v1_categories",
+  budgets: "ft_v1_budgets",
+  settings: "ft_v1_settings",
+  recurring: "ft_v1_recurring"
+};
+
+const DEFAULT_SETTINGS = {
+  baseCurrency: "UAH",
+  defaultCurrency: "UAH"
+};
+
+const DEFAULT_CATEGORY_NAMES = {
+  expense: ["Еда", "Аренда", "Транспорт", "Связь", "Здоровье", "Одежда", "Развлечения", "Подписки", "Дом", "Другое"],
+  income: ["Зарплата", "Фриланс", "Подарки", "Другое"]
+};
+
+const state = {
+  activeTab: "add",
+  transactions: [],
+  categories: [],
+  budgets: [],
+  recurring: [],
+  settings: { ...DEFAULT_SETTINGS },
+  ui: {
+    addType: "expense",
+    txFilter: "all",
+    txSearch: "",
+    txCategoryFilter: "all",
+    txMonthFilter: "",
+    reportCurrency: "UAH",
+    analyticsMonth: monthKeyOf(new Date()),
+    budgetsMonth: monthKeyOf(new Date()),
+    ioStatus: "",
+    ioText: ""
+  }
+};
+
+const viewRoot = document.getElementById("view-root");
+const tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
+const modalRoot = document.getElementById("modal-root");
+const toastEl = document.getElementById("toast");
+const subtitleEl = document.getElementById("header-subtitle");
+
+let toastTimer = null;
+let monthlyChart = null;
+let categoryChart = null;
+let activeToastAction = null;
+
+const pwaState = {
+  swRegistration: null,
+  reloading: false
+};
+
+init();
+
+function init() {
+  loadAll();
+  bindEvents();
+  render();
+  setupPwa();
+}
+
+function bindEvents() {
+  tabButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const tab = button.dataset.tab;
+      if (!TAB_IDS.includes(tab) || tab === state.activeTab) {
+        return;
+      }
+      state.activeTab = tab;
+      render();
+    });
+  });
+
+  viewRoot.addEventListener("click", onViewClick);
+  viewRoot.addEventListener("input", onViewInput);
+  viewRoot.addEventListener("change", onViewChange);
+  viewRoot.addEventListener("submit", onViewSubmit);
+
+  modalRoot.addEventListener("click", onModalClick);
+  modalRoot.addEventListener("submit", onModalSubmit);
+  toastEl.addEventListener("click", onToastClick);
+}
+
+function onToastClick(event) {
+  const target = event.target;
+  if (!target.matches("[data-toast-action]")) {
+    return;
+  }
+  if (typeof activeToastAction === "function") {
+    activeToastAction();
+  }
+}
+
+function onViewClick(event) {
+  const target = event.target;
+
+  if (target.matches("[data-action='set-add-type']")) {
+    state.ui.addType = target.dataset.value === "income" ? "income" : "expense";
+    render();
+    return;
+  }
+
+  if (target.matches("[data-action='quick-add']")) {
+    handleQuickAdd();
+    return;
+  }
+
+  if (target.matches("[data-action='save-transaction']")) {
+    handleFormSave();
+    return;
+  }
+
+  if (target.matches("[data-action='set-filter']")) {
+    state.ui.txFilter = target.dataset.value || "all";
+    render();
+    return;
+  }
+
+  if (target.matches("[data-action='delete-transaction']")) {
+    const id = Number(target.dataset.id);
+    if (Number.isFinite(id)) {
+      deleteTransaction(id);
+    }
+    return;
+  }
+
+  if (target.matches("[data-action='edit-transaction']")) {
+    const id = Number(target.dataset.id);
+    if (Number.isFinite(id)) {
+      openTransactionEditModal(id);
+    }
+    return;
+  }
+
+  if (target.matches("[data-action='analytics-refresh']")) {
+    if (state.activeTab === "analytics") {
+      initAnalyticsCharts();
+    }
+    showToast("Аналитика обновлена");
+    return;
+  }
+
+  if (target.matches("[data-action='open-categories']")) {
+    openManageCategoriesModal();
+    return;
+  }
+
+  if (target.matches("[data-action='open-recurring-modal']")) {
+    openRecurringModal();
+    return;
+  }
+
+  if (target.matches("[data-action='delete-recurring']")) {
+    const id = target.dataset.id;
+    if (id) {
+      deleteRecurringRule(id);
+    }
+    return;
+  }
+
+  if (target.matches("[data-action='export-json']")) {
+    exportJsonToTextarea();
+    return;
+  }
+
+  if (target.matches("[data-action='import-json']")) {
+    importJsonFromTextarea();
+    return;
+  }
+
+  if (target.matches("[data-action='reset-all']")) {
+    resetAllData();
+    return;
+  }
+
+  if (target.matches("[data-action='budget-clear']")) {
+    const categoryId = target.dataset.categoryId;
+    const month = target.dataset.month;
+    const currency = target.dataset.currency;
+    setBudget(month, categoryId, currency, 0);
+    render();
+    showToast("Бюджет очищен");
+  }
+}
+
+function onViewChange(event) {
+  const target = event.target;
+
+  if (target.matches("#analytics-currency") || target.matches("#budgets-currency")) {
+    state.ui.reportCurrency = sanitizeCurrency(target.value, state.ui.reportCurrency);
+    render();
+    return;
+  }
+
+  if (target.matches("#analytics-month")) {
+    state.ui.analyticsMonth = sanitizeMonthKey(target.value, monthKeyOf(new Date()));
+    render();
+    return;
+  }
+
+  if (target.matches("#budgets-month")) {
+    state.ui.budgetsMonth = sanitizeMonthKey(target.value, monthKeyOf(new Date()));
+    render();
+    return;
+  }
+
+  if (target.matches("#tx-category-filter")) {
+    state.ui.txCategoryFilter = String(target.value || "all");
+    render();
+    return;
+  }
+
+  if (target.matches("#tx-month-filter")) {
+    state.ui.txMonthFilter = String(target.value || "");
+    render();
+    return;
+  }
+
+  if (target.matches("[data-action='budget-amount']")) {
+    const categoryId = target.dataset.categoryId;
+    const monthKey = target.dataset.month;
+    const currency = target.dataset.currency;
+    const amount = parseNumber(target.value);
+    setBudget(monthKey, categoryId, currency, amount);
+    render();
+    return;
+  }
+
+  if (target.matches("#settings-base-currency")) {
+    state.settings.baseCurrency = sanitizeCurrency(target.value, state.settings.baseCurrency);
+    saveSettings();
+    render();
+    showToast("Базовая валюта сохранена");
+    return;
+  }
+
+  if (target.matches("#settings-default-currency")) {
+    state.settings.defaultCurrency = sanitizeCurrency(target.value, state.settings.defaultCurrency);
+    saveSettings();
+    render();
+    showToast("Валюта по умолчанию сохранена");
+    return;
+  }
+
+  if (target.matches("#io-json")) {
+    state.ui.ioText = target.value;
+  }
+}
+
+function onViewInput(event) {
+  const target = event.target;
+  if (target.matches("#tx-search")) {
+    state.ui.txSearch = String(target.value || "");
+    render();
+  }
+}
+
+function onViewSubmit(event) {
+  event.preventDefault();
+}
+
+function onModalClick(event) {
+  const target = event.target;
+
+  if (target === modalRoot || target.matches("[data-action='close-modal']")) {
+    closeModal();
+    return;
+  }
+
+  if (target.matches("[data-action='category-delete']")) {
+    const id = target.dataset.id;
+    if (id) {
+      deleteCategory(id);
+    }
+    return;
+  }
+
+  if (target.matches("[data-action='category-up']")) {
+    const id = target.dataset.id;
+    if (id) {
+      moveCategory(id, -1);
+    }
+    return;
+  }
+
+  if (target.matches("[data-action='category-down']")) {
+    const id = target.dataset.id;
+    if (id) {
+      moveCategory(id, 1);
+    }
+  }
+}
+
+function onModalSubmit(event) {
+  event.preventDefault();
+  const form = event.target;
+
+  if (form.matches("[data-form='category-add']")) {
+    const formData = new FormData(form);
+    const type = sanitizeType(formData.get("type"));
+    const name = String(formData.get("name") || "").trim();
+    addCategory(type, name);
+    return;
+  }
+
+  if (form.matches("[data-form='transaction-edit']")) {
+    const formData = new FormData(form);
+    saveTransactionEdit(formData);
+    return;
+  }
+
+  if (form.matches("[data-form='recurring-add']")) {
+    const formData = new FormData(form);
+    addRecurringRule(formData);
+  }
+}
+
+function render() {
+  syncNav();
+  renderSubtitle();
+  renderView();
+}
+
+function syncNav() {
+  tabButtons.forEach((button) => {
+    const isActive = button.dataset.tab === state.activeTab;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-current", isActive ? "page" : "false");
+  });
+}
+
+function renderSubtitle() {
+  const mk = monthKeyOf(new Date());
+  const monthTx = state.transactions.filter((tx) => tx.dateISO.startsWith(mk) && tx.currency === state.settings.defaultCurrency);
+  const net = monthTx.reduce((sum, tx) => sum + (tx.type === "income" ? tx.amount : -tx.amount), 0);
+  subtitleEl.textContent = `Этот месяц (${state.settings.defaultCurrency}): ${formatSigned(net)}`;
+}
+
+function renderView() {
+  const builders = {
+    add: buildAddTab,
+    transactions: buildTransactionsTab,
+    analytics: buildAnalyticsTab,
+    budgets: buildBudgetsTab,
+    settings: buildSettingsTab
+  };
+
+  const build = builders[state.activeTab] || builders.add;
+  viewRoot.innerHTML = build();
+
+  if (state.activeTab === "analytics") {
+    initAnalyticsCharts();
+  }
+}
+
+function buildAddTab() {
+  return `
+    <section class="tab-view" data-view="add">
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Быстрое добавление</h2>
+          <p class="card-note">Пример: +30000 зарплата USD</p>
+        </div>
+        <div class="quick-add">
+          <input id="quick-input" type="text" placeholder="Сумма категория [валюта]" />
+          <button class="btn-brand" data-action="quick-add" type="button">Добавить</button>
+        </div>
+      </article>
+
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Форма операции</h2>
+        </div>
+
+        <form class="form-grid" action="#">
+          <div class="field">
+            <label>Тип</label>
+            <div class="type-toggle" role="group" aria-label="Тип операции">
+              <button type="button" data-action="set-add-type" data-value="expense" class="${state.ui.addType === "expense" ? "active" : ""}">Расход</button>
+              <button type="button" data-action="set-add-type" data-value="income" class="${state.ui.addType === "income" ? "active" : ""}">Доход</button>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div class="field">
+              <label for="add-amount">Сумма</label>
+              <input id="add-amount" type="text" inputmode="decimal" placeholder="0,00" />
+            </div>
+            <div class="field">
+              <label for="add-currency">Валюта</label>
+              <select id="add-currency">${currencyOptions(state.settings.defaultCurrency)}</select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="add-category">Категория</label>
+            <select id="add-category">${categoryOptions(state.ui.addType, "")}</select>
+          </div>
+
+          <div class="grid-2">
+            <div class="field">
+              <label for="add-date">Дата</label>
+              <input id="add-date" type="date" value="${dateISO(new Date())}" />
+            </div>
+            <div class="field">
+              <label for="add-note">Заметка</label>
+              <input id="add-note" type="text" placeholder="Необязательно" />
+            </div>
+          </div>
+
+          <button class="btn-secondary" data-action="save-transaction" type="button">Сохранить операцию</button>
+        </form>
+      </article>
+    </section>
+  `;
+}
+
+function buildTransactionsTab() {
+  const tx = filteredTransactions();
+  const groups = groupTransactionsByDate(tx);
+  const listHtml = tx.length
+    ? groups.map((group) => `
+      <section class="tx-group">
+        <p class="tx-group-label">${group.label}</p>
+        ${group.items.map(renderTransactionRow).join("")}
+      </section>
+    `).join("")
+    : `<article class="glass glass-card placeholder"><div><h2>Пока нет операций</h2><p class="card-note">Добавьте первую операцию на вкладке «Добавить»</p></div></article>`;
+
+  return `
+    <section class="tab-view" data-view="transactions">
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>История операций</h2>
+          <p class="card-note">${tx.length} шт.</p>
+        </div>
+
+        <div class="chips" role="group" aria-label="Фильтр операций">
+          <button class="${state.ui.txFilter === "all" ? "active" : ""}" type="button" data-action="set-filter" data-value="all">Все</button>
+          <button class="${state.ui.txFilter === "expense" ? "active" : ""}" type="button" data-action="set-filter" data-value="expense">Расходы</button>
+          <button class="${state.ui.txFilter === "income" ? "active" : ""}" type="button" data-action="set-filter" data-value="income">Доходы</button>
+        </div>
+
+        <div class="filters-grid">
+          <div class="field">
+            <label for="tx-search">Поиск</label>
+            <input id="tx-search" type="text" placeholder="Поиск операций..." value="${escapeHtml(state.ui.txSearch)}" />
+          </div>
+          <div class="field">
+            <label for="tx-category-filter">Категория</label>
+            <select id="tx-category-filter">
+              <option value="all" ${state.ui.txCategoryFilter === "all" ? "selected" : ""}>Все категории</option>
+              ${allCategoriesOptions(state.ui.txCategoryFilter)}
+            </select>
+          </div>
+          <div class="field">
+            <label for="tx-month-filter">Месяц</label>
+            <input id="tx-month-filter" type="month" value="${state.ui.txMonthFilter}" />
+          </div>
+        </div>
+      </article>
+
+      <div class="transaction-list">${listHtml}</div>
+    </section>
+  `;
+}
+
+function buildAnalyticsTab() {
+  return `
+    <section class="tab-view" data-view="analytics">
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Аналитика расходов</h2>
+          <button class="btn-secondary" data-action="analytics-refresh" type="button">Обновить</button>
+        </div>
+        <div class="toolbar">
+          <div class="toolbar-row">
+            <div class="field">
+              <label for="analytics-currency">Валюта</label>
+              <select id="analytics-currency">${currencyOptions(state.ui.reportCurrency)}</select>
+            </div>
+            <div class="field">
+              <label for="analytics-month">Месяц</label>
+              <input id="analytics-month" type="month" value="${state.ui.analyticsMonth}" />
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="analytics-grid">
+        <article class="glass glass-card">
+          <h3>Расходы за 6 месяцев (${state.ui.reportCurrency})</h3>
+          <div class="chart-wrap"><canvas id="monthly-expenses-chart"></canvas></div>
+        </article>
+
+        <article class="glass glass-card">
+          <h3>Категории (${state.ui.analyticsMonth}, ${state.ui.reportCurrency})</h3>
+          <div class="chart-wrap"><canvas id="category-expenses-chart"></canvas></div>
+        </article>
+      </div>
+    </section>
+  `;
+}
+
+function buildBudgetsTab() {
+  const month = state.ui.budgetsMonth;
+  const currency = state.ui.reportCurrency;
+  const expenseCats = getCategoriesByType("expense");
+
+  const rows = expenseCats.map((cat) => {
+    const spent = spentByCategory(month, currency, cat.id);
+    const budget = getBudget(month, currency, cat.id);
+    const ratio = budget > 0 ? Math.min(100, (spent / budget) * 100) : 0;
+    const over = budget > 0 && spent > budget;
+
+    return `
+      <div class="budget-row ${over ? "over" : ""}">
+        <div class="budget-head">
+          <strong>${escapeHtml(cat.name)}</strong>
+          <span class="card-note">${formatAmount(spent)} / ${formatAmount(budget)} ${currency}</span>
+        </div>
+        <div class="budget-controls">
+          <input
+            type="text"
+            inputmode="decimal"
+            placeholder="Бюджет"
+            value="${budget > 0 ? formatAmount(budget) : ""}"
+            data-action="budget-amount"
+            data-category-id="${cat.id}"
+            data-month="${month}"
+            data-currency="${currency}"
+          />
+          <button class="btn-secondary btn-small" type="button" data-action="budget-clear" data-category-id="${cat.id}" data-month="${month}" data-currency="${currency}">Очистить</button>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" style="width:${ratio}%;"></div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <section class="tab-view" data-view="budgets">
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Бюджеты по категориям</h2>
+        </div>
+
+        <div class="toolbar-row">
+          <div class="field">
+            <label for="budgets-month">Месяц</label>
+            <input id="budgets-month" type="month" value="${month}" />
+          </div>
+          <div class="field">
+            <label for="budgets-currency">Валюта</label>
+            <select id="budgets-currency">${currencyOptions(currency)}</select>
+          </div>
+        </div>
+      </article>
+
+      <article class="glass glass-card">
+        <div class="budget-list">${rows}</div>
+      </article>
+    </section>
+  `;
+}
+
+function buildSettingsTab() {
+  const recurringItems = state.recurring.length
+    ? state.recurring.map((rule) => renderRecurringRow(rule)).join("")
+    : "<p class='card-note'>Пока нет повторяющихся платежей</p>";
+
+  return `
+    <section class="tab-view" data-view="settings">
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Валюты</h2>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="settings-base-currency">Базовая валюта</label>
+            <select id="settings-base-currency">${currencyOptions(state.settings.baseCurrency)}</select>
+          </div>
+          <div class="field">
+            <label for="settings-default-currency">Валюта по умолчанию</label>
+            <select id="settings-default-currency">${currencyOptions(state.settings.defaultCurrency)}</select>
+          </div>
+        </div>
+      </article>
+
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Категории</h2>
+        </div>
+        <button class="btn-secondary" type="button" data-action="open-categories">Управление категориями</button>
+      </article>
+
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Повторяющиеся платежи</h2>
+          <button class="btn-secondary btn-small" type="button" data-action="open-recurring-modal">Добавить</button>
+        </div>
+        <div class="recurring-list">${recurringItems}</div>
+      </article>
+
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Экспорт / Импорт JSON</h2>
+        </div>
+        <textarea id="io-json" placeholder="Нажмите «Экспорт JSON» или вставьте JSON для импорта">${escapeHtml(state.ui.ioText)}</textarea>
+        <div class="io-actions">
+          <button class="btn-secondary" type="button" data-action="export-json">Экспорт JSON</button>
+          <button class="btn-secondary" type="button" data-action="import-json">Импорт JSON</button>
+        </div>
+        <p class="io-status ${state.ui.ioStatus.includes("Ошибка") ? "error" : "success"}">${state.ui.ioStatus || "Готово"}</p>
+      </article>
+
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Сброс</h2>
+        </div>
+        <button class="btn-danger" type="button" data-action="reset-all">Сбросить все данные</button>
+      </article>
+    </section>
+  `;
+}
+
+function renderTransactionRow(tx) {
+  const cat = findCategoryById(tx.categoryId);
+  const sign = tx.type === "income" ? "+" : "−";
+  return `
+    <article class="tx-row">
+      <div>
+        <div class="tx-title">${escapeHtml(cat ? cat.name : "Без категории")}</div>
+        <div class="tx-meta">${formatDate(tx.dateISO)}${tx.note ? ` · ${escapeHtml(tx.note)}` : ""}</div>
+      </div>
+      <div>
+        <div class="tx-amount ${tx.type}">${sign}${formatAmount(tx.amount)} ${tx.currency}</div>
+        <div class="tx-actions">
+          <button class="btn-secondary btn-small" data-action="edit-transaction" data-id="${tx.id}" type="button">Изменить</button>
+          <button class="btn-danger btn-small" data-action="delete-transaction" data-id="${tx.id}" type="button">Удалить</button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderRecurringRow(rule) {
+  const cat = findCategoryById(rule.categoryId);
+  const scheduleText = rule.schedule === "weekly"
+    ? `Еженедельно (${weekdayLabel(rule.dayOfWeek)})`
+    : `Ежемесячно (${rule.dayOfMonth || 1} число)`;
+  return `
+    <div class="recurring-row">
+      <div class="recurring-head">
+        <strong>${formatAmount(rule.amount)} ${rule.currency}</strong>
+        <button class="btn-danger btn-small" type="button" data-action="delete-recurring" data-id="${rule.id}">Удалить</button>
+      </div>
+      <p class="card-note">${escapeHtml(cat ? cat.name : "Без категории")} · ${scheduleText}</p>
+      ${rule.note ? `<p class="card-note">${escapeHtml(rule.note)}</p>` : ""}
+    </div>
+  `;
+}
+
+function filteredTransactions() {
+  const q = normalize(state.ui.txSearch);
+  return [...state.transactions]
+    .filter((tx) => state.ui.txFilter === "all" || tx.type === state.ui.txFilter)
+    .filter((tx) => state.ui.txCategoryFilter === "all" || tx.categoryId === state.ui.txCategoryFilter)
+    .filter((tx) => !state.ui.txMonthFilter || tx.dateISO.startsWith(state.ui.txMonthFilter))
+    .filter((tx) => {
+      if (!q) {
+        return true;
+      }
+      const cat = findCategoryById(tx.categoryId);
+      const hay = [
+        cat ? cat.name : "",
+        tx.note || "",
+        String(tx.amount),
+        formatAmount(tx.amount),
+        tx.currency
+      ].map(normalize).join(" ");
+      return hay.includes(q);
+    })
+    .sort((a, b) => {
+      if (a.dateISO !== b.dateISO) {
+        return b.dateISO.localeCompare(a.dateISO);
+      }
+      return b.id - a.id;
+    });
+}
+
+function handleQuickAdd() {
+  const input = viewRoot.querySelector("#quick-input");
+  if (!input) {
+    return;
+  }
+
+  const text = input.value.trim();
+  if (!text) {
+    showToast("Введите строку: 250 еда USD");
+    return;
+  }
+
+  const parsed = parseQuickInput(text);
+  if (!parsed.ok) {
+    showToast(parsed.message);
+    return;
+  }
+
+  const category = findCategoryByName(parsed.type, parsed.categoryName);
+  if (!category) {
+    showToast(`Категория «${parsed.categoryName}» не найдена`);
+    openManageCategoriesModal(parsed.type, parsed.categoryName);
+    return;
+  }
+
+  const tx = {
+    id: nextId(),
+    type: parsed.type,
+    amount: parsed.amount,
+    currency: parsed.currency || state.settings.defaultCurrency,
+    categoryId: category.id,
+    dateISO: dateISO(new Date()),
+    note: ""
+  };
+
+  state.transactions.push(tx);
+  saveTransactions();
+  input.value = "";
+  render();
+  showToast("Операция добавлена");
+}
+
+function handleFormSave() {
+  const amountEl = viewRoot.querySelector("#add-amount");
+  const currencyEl = viewRoot.querySelector("#add-currency");
+  const categoryEl = viewRoot.querySelector("#add-category");
+  const dateEl = viewRoot.querySelector("#add-date");
+  const noteEl = viewRoot.querySelector("#add-note");
+
+  if (!amountEl || !currencyEl || !categoryEl || !dateEl || !noteEl) {
+    return;
+  }
+
+  const amount = parseNumber(amountEl.value);
+  if (!(amount > 0)) {
+    showToast("Сумма должна быть больше 0");
+    return;
+  }
+
+  const categoryId = String(categoryEl.value || "").trim();
+  if (!categoryId || !findCategoryById(categoryId)) {
+    showToast("Выберите категорию");
+    return;
+  }
+
+  const tx = {
+    id: nextId(),
+    type: state.ui.addType,
+    amount,
+    currency: sanitizeCurrency(currencyEl.value, state.settings.defaultCurrency),
+    categoryId,
+    dateISO: sanitizeDateISO(dateEl.value),
+    note: String(noteEl.value || "").trim()
+  };
+
+  state.transactions.push(tx);
+  saveTransactions();
+
+  amountEl.value = "";
+  noteEl.value = "";
+  dateEl.value = dateISO(new Date());
+
+  render();
+  showToast("Операция сохранена");
+}
+
+function deleteTransaction(id) {
+  const tx = state.transactions.find((item) => item.id === id);
+  if (!tx) {
+    return;
+  }
+  const ok = window.confirm("Удалить операцию?");
+  if (!ok) {
+    return;
+  }
+
+  state.transactions = state.transactions.filter((item) => item.id !== id);
+  saveTransactions();
+  render();
+  showToast("Операция удалена");
+}
+
+function openTransactionEditModal(id) {
+  const tx = state.transactions.find((item) => item.id === id);
+  if (!tx) {
+    return;
+  }
+
+  modalRoot.innerHTML = `
+    <div class="modal glass" role="dialog" aria-modal="true" aria-label="Редактировать операцию">
+      <div class="modal-head">
+        <h2>Редактировать операцию</h2>
+        <button class="btn-secondary" data-action="close-modal" type="button">Закрыть</button>
+      </div>
+
+      <form class="form-grid" data-form="transaction-edit">
+        <input type="hidden" name="id" value="${tx.id}" />
+
+        <div class="field">
+          <label for="edit-type">Тип</label>
+          <select id="edit-type" name="type">
+            <option value="expense" ${tx.type === "expense" ? "selected" : ""}>Расход</option>
+            <option value="income" ${tx.type === "income" ? "selected" : ""}>Доход</option>
+          </select>
+        </div>
+
+        <div class="grid-2">
+          <div class="field">
+            <label for="edit-amount">Сумма</label>
+            <input id="edit-amount" name="amount" type="text" value="${formatAmount(tx.amount)}" />
+          </div>
+          <div class="field">
+            <label for="edit-currency">Валюта</label>
+            <select id="edit-currency" name="currency">${currencyOptions(tx.currency)}</select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="edit-category">Категория</label>
+          <select id="edit-category" name="categoryId">${categoryOptions(tx.type, tx.categoryId)}</select>
+        </div>
+
+        <div class="grid-2">
+          <div class="field">
+            <label for="edit-date">Дата</label>
+            <input id="edit-date" name="dateISO" type="date" value="${tx.dateISO}" />
+          </div>
+          <div class="field">
+            <label for="edit-note">Заметка</label>
+            <input id="edit-note" name="note" type="text" value="${escapeHtml(tx.note || "")}" />
+          </div>
+        </div>
+
+        <button class="btn-brand" type="submit">Сохранить изменения</button>
+      </form>
+    </div>
+  `;
+
+  const typeSelect = modalRoot.querySelector("#edit-type");
+  const categorySelect = modalRoot.querySelector("#edit-category");
+  typeSelect.addEventListener("change", () => {
+    categorySelect.innerHTML = categoryOptions(typeSelect.value, "");
+  });
+
+  modalRoot.classList.remove("hidden");
+  modalRoot.setAttribute("aria-hidden", "false");
+}
+
+function saveTransactionEdit(formData) {
+  const id = Number(formData.get("id"));
+  const tx = state.transactions.find((item) => item.id === id);
+  if (!tx) {
+    showToast("Операция не найдена");
+    return;
+  }
+
+  const type = sanitizeType(formData.get("type"));
+  const amount = parseNumber(String(formData.get("amount") || ""));
+  const currency = sanitizeCurrency(formData.get("currency"), tx.currency);
+  const categoryId = String(formData.get("categoryId") || "");
+  const date = sanitizeDateISO(String(formData.get("dateISO") || ""));
+  const note = String(formData.get("note") || "").trim();
+
+  if (!(amount > 0)) {
+    showToast("Сумма должна быть больше 0");
+    return;
+  }
+
+  const category = findCategoryById(categoryId);
+  if (!category || category.type !== type) {
+    showToast("Выберите корректную категорию");
+    return;
+  }
+
+  tx.type = type;
+  tx.amount = amount;
+  tx.currency = currency;
+  tx.categoryId = categoryId;
+  tx.dateISO = date;
+  tx.note = note;
+
+  saveTransactions();
+  closeModal();
+  render();
+  showToast("Операция обновлена");
+}
+
+function setBudget(monthKey, categoryId, currency, amount) {
+  const mk = sanitizeMonthKey(monthKey, monthKeyOf(new Date()));
+  const cat = findCategoryById(categoryId);
+  if (!cat || cat.type !== "expense") {
+    return;
+  }
+
+  const cur = sanitizeCurrency(currency, state.ui.reportCurrency);
+  const idx = state.budgets.findIndex(
+    (b) => b.monthKey === mk && b.categoryId === categoryId && b.currency === cur
+  );
+
+  if (!(amount > 0)) {
+    if (idx >= 0) {
+      state.budgets.splice(idx, 1);
+      saveBudgets();
+    }
+    return;
+  }
+
+  const budget = {
+    monthKey: mk,
+    categoryId,
+    amount,
+    currency: cur
+  };
+
+  if (idx >= 0) {
+    state.budgets[idx] = budget;
+  } else {
+    state.budgets.push(budget);
+  }
+
+  saveBudgets();
+}
+
+function getBudget(monthKey, currency, categoryId) {
+  const found = state.budgets.find(
+    (b) => b.monthKey === monthKey && b.currency === currency && b.categoryId === categoryId
+  );
+  return found ? found.amount : 0;
+}
+
+function spentByCategory(monthKey, currency, categoryId) {
+  return state.transactions
+    .filter(
+      (tx) =>
+        tx.type === "expense" &&
+        tx.currency === currency &&
+        tx.categoryId === categoryId &&
+        tx.dateISO.startsWith(monthKey)
+    )
+    .reduce((sum, tx) => sum + tx.amount, 0);
+}
+
+function openManageCategoriesModal(prefillType = "expense", prefillName = "") {
+  const expense = getCategoriesByType("expense");
+  const income = getCategoriesByType("income");
+
+  modalRoot.innerHTML = `
+    <div class="modal glass" role="dialog" aria-modal="true" aria-label="Управление категориями">
+      <div class="modal-head">
+        <h2>Управление категориями</h2>
+        <button class="btn-secondary" data-action="close-modal" type="button">Закрыть</button>
+      </div>
+
+      <div class="category-columns">
+        <div>
+          <h3>Расходы</h3>
+          <div class="category-list">${expense.map((cat) => categoryItemTemplate(cat)).join("")}</div>
+        </div>
+        <div>
+          <h3>Доходы</h3>
+          <div class="category-list">${income.map((cat) => categoryItemTemplate(cat)).join("")}</div>
+        </div>
+      </div>
+
+      <form class="form-grid" data-form="category-add">
+        <div class="grid-2">
+          <div class="field">
+            <label for="cat-name">Название</label>
+            <input id="cat-name" name="name" type="text" value="${escapeHtml(prefillName)}" placeholder="Новая категория" />
+          </div>
+          <div class="field">
+            <label for="cat-type">Тип</label>
+            <select id="cat-type" name="type">
+              <option value="expense" ${prefillType === "expense" ? "selected" : ""}>Расход</option>
+              <option value="income" ${prefillType === "income" ? "selected" : ""}>Доход</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn-brand" type="submit">Добавить категорию</button>
+      </form>
+    </div>
+  `;
+
+  modalRoot.classList.remove("hidden");
+  modalRoot.setAttribute("aria-hidden", "false");
+}
+
+function categoryItemTemplate(cat) {
+  return `
+    <div class="category-item">
+      <div>
+        ${escapeHtml(cat.name)} ${cat.isSystem ? "<span class='tag-system'>системная</span>" : ""}
+      </div>
+      <div class="category-actions">
+        <button class="btn-secondary btn-small" data-action="category-up" data-id="${cat.id}" type="button">↑</button>
+        <button class="btn-secondary btn-small" data-action="category-down" data-id="${cat.id}" type="button">↓</button>
+        <button class="btn-danger btn-small" data-action="category-delete" data-id="${cat.id}" type="button">Удалить</button>
+      </div>
+    </div>
+  `;
+}
+
+function addCategory(type, name) {
+  if (!name) {
+    showToast("Введите название категории");
+    return;
+  }
+
+  const t = sanitizeType(type);
+  if (findCategoryByName(t, name)) {
+    showToast("Категория уже существует");
+    return;
+  }
+
+  const maxOrder = getCategoriesByType(t).reduce((max, item) => Math.max(max, item.order), -1);
+  state.categories.push({
+    id: uid("cat"),
+    type: t,
+    name,
+    isSystem: false,
+    order: maxOrder + 1
+  });
+
+  saveCategories();
+  openManageCategoriesModal(t);
+  render();
+  showToast("Категория добавлена");
+}
+
+function deleteCategory(categoryId) {
+  const cat = findCategoryById(categoryId);
+  if (!cat) {
+    return;
+  }
+
+  if (cat.isSystem) {
+    showToast("Системную категорию удалить нельзя");
+    return;
+  }
+
+  const ok = window.confirm(`Удалить категорию «${cat.name}»?`);
+  if (!ok) {
+    return;
+  }
+
+  const otherId = ensureOtherCategory(cat.type);
+
+  state.transactions = state.transactions.map((tx) => {
+    if (tx.categoryId === cat.id) {
+      return { ...tx, categoryId: otherId };
+    }
+    return tx;
+  });
+
+  state.budgets = state.budgets.map((b) => {
+    if (b.categoryId === cat.id) {
+      return { ...b, categoryId: otherId };
+    }
+    return b;
+  });
+
+  state.recurring = state.recurring.map((rule) => {
+    if (rule.categoryId === cat.id) {
+      return { ...rule, categoryId: otherId };
+    }
+    return rule;
+  });
+
+  state.categories = state.categories.filter((c) => c.id !== cat.id);
+  normalizeCategoryOrder(cat.type);
+
+  saveAll();
+  openManageCategoriesModal(cat.type);
+  render();
+  showToast("Категория удалена");
+}
+
+function moveCategory(categoryId, direction) {
+  const cat = findCategoryById(categoryId);
+  if (!cat) {
+    return;
+  }
+
+  const list = getCategoriesByType(cat.type);
+  const index = list.findIndex((item) => item.id === cat.id);
+  const targetIndex = index + direction;
+
+  if (index < 0 || targetIndex < 0 || targetIndex >= list.length) {
+    return;
+  }
+
+  const swapped = [...list];
+  const tmp = swapped[index];
+  swapped[index] = swapped[targetIndex];
+  swapped[targetIndex] = tmp;
+
+  swapped.forEach((item, idx) => {
+    const original = findCategoryById(item.id);
+    if (original) {
+      original.order = idx;
+    }
+  });
+
+  saveCategories();
+  openManageCategoriesModal(cat.type);
+  render();
+}
+
+function openRecurringModal() {
+  modalRoot.innerHTML = `
+    <div class="modal glass" role="dialog" aria-modal="true" aria-label="Добавить повторяющийся платеж">
+      <div class="modal-head">
+        <h2>Новый повторяющийся платеж</h2>
+        <button class="btn-secondary" data-action="close-modal" type="button">Закрыть</button>
+      </div>
+      <form class="form-grid" data-form="recurring-add">
+        <div class="grid-2">
+          <div class="field">
+            <label for="rec-type">Тип</label>
+            <select id="rec-type" name="type">
+              <option value="expense">Расход</option>
+              <option value="income">Доход</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="rec-schedule">Расписание</label>
+            <select id="rec-schedule" name="schedule">
+              <option value="monthly">Ежемесячно</option>
+              <option value="weekly">Еженедельно</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="rec-amount">Сумма</label>
+            <input id="rec-amount" name="amount" type="text" placeholder="0,00" />
+          </div>
+          <div class="field">
+            <label for="rec-currency">Валюта</label>
+            <select id="rec-currency" name="currency">${currencyOptions(state.settings.defaultCurrency)}</select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="rec-category">Категория</label>
+          <select id="rec-category" name="categoryId">${categoryOptions("expense", "")}</select>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="rec-day-month">День месяца (1-31)</label>
+            <input id="rec-day-month" name="dayOfMonth" type="number" min="1" max="31" value="1" />
+          </div>
+          <div class="field">
+            <label for="rec-day-week">День недели</label>
+            <select id="rec-day-week" name="dayOfWeek">
+              <option value="1">Понедельник</option>
+              <option value="2">Вторник</option>
+              <option value="3">Среда</option>
+              <option value="4">Четверг</option>
+              <option value="5">Пятница</option>
+              <option value="6">Суббота</option>
+              <option value="0">Воскресенье</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="rec-note">Заметка</label>
+          <input id="rec-note" name="note" type="text" placeholder="Необязательно" />
+        </div>
+        <button class="btn-brand" type="submit">Сохранить</button>
+      </form>
+    </div>
+  `;
+
+  const typeEl = modalRoot.querySelector("#rec-type");
+  const catEl = modalRoot.querySelector("#rec-category");
+  typeEl.addEventListener("change", () => {
+    catEl.innerHTML = categoryOptions(typeEl.value, "");
+  });
+
+  modalRoot.classList.remove("hidden");
+  modalRoot.setAttribute("aria-hidden", "false");
+}
+
+function addRecurringRule(formData) {
+  const type = sanitizeType(formData.get("type"));
+  const schedule = formData.get("schedule") === "weekly" ? "weekly" : "monthly";
+  const amount = parseNumber(formData.get("amount"));
+  const currency = sanitizeCurrency(formData.get("currency"), state.settings.defaultCurrency);
+  const categoryId = String(formData.get("categoryId") || "");
+  const note = String(formData.get("note") || "").trim();
+  const dayOfMonthRaw = Number(formData.get("dayOfMonth"));
+  const dayOfWeekRaw = Number(formData.get("dayOfWeek"));
+
+  if (!(amount > 0)) {
+    showToast("Сумма должна быть больше 0");
+    return;
+  }
+
+  const cat = findCategoryById(categoryId);
+  if (!cat || cat.type !== type) {
+    showToast("Выберите корректную категорию");
+    return;
+  }
+
+  const rule = {
+    id: uid("rec"),
+    type,
+    amount,
+    currency,
+    categoryId,
+    note,
+    schedule,
+    dayOfMonth: Math.min(31, Math.max(1, Number.isFinite(dayOfMonthRaw) ? Math.floor(dayOfMonthRaw) : 1)),
+    dayOfWeek: Math.min(6, Math.max(0, Number.isFinite(dayOfWeekRaw) ? Math.floor(dayOfWeekRaw) : 1)),
+    lastGenerated: ""
+  };
+
+  state.recurring.push(rule);
+  saveRecurring();
+  closeModal();
+  render();
+  showToast("Повторяющийся платеж добавлен");
+}
+
+function deleteRecurringRule(id) {
+  const rule = state.recurring.find((item) => item.id === id);
+  if (!rule) {
+    return;
+  }
+  if (!window.confirm("Удалить повторяющийся платеж?")) {
+    return;
+  }
+  state.recurring = state.recurring.filter((item) => item.id !== id);
+  saveRecurring();
+  render();
+  showToast("Повторяющийся платеж удален");
+}
+
+function normalizeRecurring(raw, categoriesMap) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const type = sanitizeType(item.type);
+      const amount = parseNumber(item.amount);
+      if (!(amount > 0)) {
+        return null;
+      }
+      const categoryId = String(item.categoryId || "");
+      const cat = categoriesMap.get(categoryId);
+      if (!cat || cat.type !== type) {
+        return null;
+      }
+      return {
+        id: String(item.id || uid("rec")),
+        type,
+        amount,
+        currency: sanitizeCurrency(item.currency, DEFAULT_SETTINGS.defaultCurrency),
+        categoryId,
+        note: String(item.note || "").trim(),
+        schedule: item.schedule === "weekly" ? "weekly" : "monthly",
+        dayOfMonth: Math.min(31, Math.max(1, Number(item.dayOfMonth) || 1)),
+        dayOfWeek: Math.min(6, Math.max(0, Number(item.dayOfWeek) || 1)),
+        lastGenerated: /^\d{4}-\d{2}-\d{2}$/.test(String(item.lastGenerated || "")) ? String(item.lastGenerated) : ""
+      };
+    })
+    .filter(Boolean);
+}
+
+function applyRecurringTransactions() {
+  const today = dateISO(new Date());
+  let hasChanges = false;
+
+  state.recurring.forEach((rule) => {
+    const fromDate = rule.lastGenerated || today;
+    const dates = dueDatesBetween(fromDate, today, rule);
+    if (!dates.length) {
+      if (!rule.lastGenerated) {
+        rule.lastGenerated = today;
+        hasChanges = true;
+      }
+      return;
+    }
+
+    dates.forEach((d) => {
+      state.transactions.push({
+        id: nextId(),
+        type: rule.type,
+        amount: rule.amount,
+        currency: rule.currency,
+        categoryId: rule.categoryId,
+        dateISO: d,
+        note: rule.note || "Повторяющийся платеж"
+      });
+    });
+
+    rule.lastGenerated = today;
+    hasChanges = true;
+  });
+
+  if (hasChanges) {
+    saveTransactions();
+    saveRecurring();
+  }
+}
+
+function dueDatesBetween(fromISO, toISO, rule) {
+  const from = new Date(fromISO + "T00:00:00");
+  const to = new Date(toISO + "T00:00:00");
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
+    return [];
+  }
+
+  const dates = [];
+  const start = new Date(from);
+  start.setDate(start.getDate() + 1);
+
+  for (let d = new Date(start); d <= to; d.setDate(d.getDate() + 1)) {
+    if (rule.schedule === "weekly") {
+      if (d.getDay() === rule.dayOfWeek) {
+        dates.push(dateISO(d));
+      }
+    } else if (d.getDate() === rule.dayOfMonth) {
+      dates.push(dateISO(d));
+    }
+  }
+  return dates;
+}
+
+function exportJsonToTextarea() {
+  const textarea = viewRoot.querySelector("#io-json");
+  if (!textarea) {
+    return;
+  }
+
+  const payload = {
+    settings: state.settings,
+    categories: state.categories,
+    transactions: state.transactions,
+    budgets: state.budgets,
+    recurring: state.recurring
+  };
+
+  state.ui.ioText = JSON.stringify(payload, null, 2);
+  state.ui.ioStatus = "Экспортировано в поле ниже";
+  render();
+  showToast("JSON экспортирован");
+}
+
+function importJsonFromTextarea() {
+  const textarea = viewRoot.querySelector("#io-json");
+  if (!textarea) {
+    return;
+  }
+
+  const raw = textarea.value.trim();
+  state.ui.ioText = textarea.value;
+  if (!raw) {
+    state.ui.ioStatus = "Ошибка: вставьте JSON";
+    render();
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_err) {
+    state.ui.ioStatus = "Ошибка: некорректный JSON";
+    render();
+    return;
+  }
+
+  const result = validateImportedPayload(parsed);
+  if (!result.ok) {
+    state.ui.ioStatus = `Ошибка: ${result.message}`;
+    render();
+    return;
+  }
+
+  state.settings = result.settings;
+  state.categories = result.categories;
+  state.transactions = result.transactions;
+  state.budgets = result.budgets;
+  state.recurring = result.recurring;
+
+  ensureDataIntegrity();
+  saveAll();
+
+  state.ui.reportCurrency = state.settings.defaultCurrency;
+  state.ui.ioStatus = "Импорт выполнен успешно";
+  render();
+  showToast("Данные импортированы");
+}
+
+function validateImportedPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return { ok: false, message: "ожидался объект" };
+  }
+
+  const settings = normalizeSettings(payload.settings || DEFAULT_SETTINGS);
+  const categories = normalizeCategories(Array.isArray(payload.categories) ? payload.categories : []);
+  if (!categories.length) {
+    return { ok: false, message: "категории отсутствуют" };
+  }
+
+  const categoriesMap = new Map(categories.map((c) => [c.id, c]));
+  const transactions = normalizeTransactions(
+    Array.isArray(payload.transactions) ? payload.transactions : [],
+    categoriesMap
+  );
+  const budgets = normalizeBudgets(
+    Array.isArray(payload.budgets) ? payload.budgets : [],
+    categoriesMap
+  );
+  const recurring = normalizeRecurring(
+    Array.isArray(payload.recurring) ? payload.recurring : [],
+    categoriesMap
+  );
+
+  return { ok: true, settings, categories, transactions, budgets, recurring };
+}
+
+function resetAllData() {
+  const ok = window.confirm("Сбросить все данные? Это действие необратимо.");
+  if (!ok) {
+    return;
+  }
+
+  state.transactions = [];
+  state.budgets = [];
+  state.recurring = [];
+  state.categories = seedDefaultCategories();
+  state.settings = { ...DEFAULT_SETTINGS };
+  state.ui.reportCurrency = state.settings.defaultCurrency;
+  state.ui.ioText = "";
+  state.ui.ioStatus = "Данные сброшены";
+
+  saveAll();
+  closeModal();
+  render();
+  showToast("Все данные сброшены");
+}
+
+function setupPwa() {
+  setupManifestLink();
+  registerServiceWorker();
+}
+
+function setupManifestLink() {
+  try {
+    const manifest = buildManifestObject();
+    const manifestBlob = new Blob([JSON.stringify(manifest)], {
+      type: "application/manifest+json"
+    });
+    const manifestUrl = URL.createObjectURL(manifestBlob);
+
+    let link = document.querySelector("link[rel='manifest']");
+    if (!link) {
+      link = document.createElement("link");
+      link.setAttribute("rel", "manifest");
+      document.head.appendChild(link);
+    }
+    link.setAttribute("href", manifestUrl);
+  } catch (_err) {
+    showToast("PWA манифест не создан");
+  }
+}
+
+function buildManifestObject() {
+  const icon192 = buildIconDataUrl(192);
+  const icon512 = buildIconDataUrl(512);
+  return {
+    name: "Финансовый трекер",
+    short_name: "Финансы",
+    start_url: "./",
+    display: "standalone",
+    background_color: "#000000",
+    theme_color: "#000000",
+    lang: "ru",
+    icons: [
+      {
+        src: icon192,
+        sizes: "192x192",
+        type: "image/svg+xml",
+        purpose: "any maskable"
+      },
+      {
+        src: icon512,
+        sizes: "512x512",
+        type: "image/svg+xml",
+        purpose: "any maskable"
+      }
+    ]
+  };
+}
+
+function buildIconDataUrl(size) {
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 512 512">
+      <defs>
+        <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#000000"/>
+          <stop offset="35%" stop-color="#C10801"/>
+          <stop offset="72%" stop-color="#F16001"/>
+          <stop offset="100%" stop-color="#D9C3AB"/>
+        </linearGradient>
+      </defs>
+      <rect width="512" height="512" rx="110" fill="#000000"/>
+      <circle cx="256" cy="256" r="188" fill="url(#g)"/>
+      <circle cx="256" cy="256" r="176" fill="none" stroke="#E85002" stroke-width="12" opacity="0.9"/>
+      <path d="M188 284h136c30 0 47-16 47-40c0-22-15-36-44-36h-58c-22 0-32-8-32-21c0-12 9-20 27-20h111"
+            fill="none" stroke="#F9F9F9" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `.trim();
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) {
+    return;
+  }
+
+  try {
+    const swCode = buildServiceWorkerCode();
+    const swBlob = new Blob([swCode], { type: "text/javascript" });
+    const swUrl = URL.createObjectURL(swBlob);
+    const registration = await navigator.serviceWorker.register(swUrl);
+
+    pwaState.swRegistration = registration;
+    monitorServiceWorkerUpdates(registration);
+
+    if (registration.waiting) {
+      showUpdateToast(registration);
+    }
+
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (pwaState.reloading) {
+        return;
+      }
+      pwaState.reloading = true;
+      window.location.reload();
+    });
+  } catch (_err) {
+    showToast("Service Worker не зарегистрирован");
+  }
+}
+
+function monitorServiceWorkerUpdates(registration) {
+  registration.addEventListener("updatefound", () => {
+    const installing = registration.installing;
+    if (!installing) {
+      return;
+    }
+
+    installing.addEventListener("statechange", () => {
+      if (installing.state === "installed" && navigator.serviceWorker.controller) {
+        showUpdateToast(registration);
+      }
+    });
+  });
+}
+
+function showUpdateToast(registration) {
+  showToast("Обновление доступно — перезагрузить", {
+    label: "Перезагрузить",
+    onClick: () => {
+      if (registration.waiting) {
+        registration.waiting.postMessage({ type: "SKIP_WAITING" });
+      } else {
+        window.location.reload();
+      }
+    }
+  }, 12000);
+}
+
+function buildServiceWorkerCode() {
+  return `
+    const CACHE_NAME = "ft-v1-cache-20260304-3";
+    const STATIC_DESTINATIONS = new Set(["style", "script"]);
+
+    function buildCoreUrls() {
+      const scope = self.registration.scope;
+      return [
+        new URL("/", scope).href,
+        new URL("./", scope).href,
+        new URL("index.html", scope).href,
+        new URL("styles.css", scope).href,
+        new URL("app.js", scope).href
+      ];
+    }
+
+    self.addEventListener("install", (event) => {
+      event.waitUntil((async () => {
+        const cache = await caches.open(CACHE_NAME);
+        await cache.addAll(buildCoreUrls());
+        await self.skipWaiting();
+      })());
+    });
+
+    self.addEventListener("activate", (event) => {
+      event.waitUntil((async () => {
+        const keys = await caches.keys();
+        await Promise.all(
+          keys
+            .filter((key) => key !== CACHE_NAME)
+            .map((key) => caches.delete(key))
+        );
+        await self.clients.claim();
+      })());
+    });
+
+    self.addEventListener("message", (event) => {
+      if (event.data && event.data.type === "SKIP_WAITING") {
+        self.skipWaiting();
+      }
+    });
+
+    self.addEventListener("fetch", (event) => {
+      const req = event.request;
+      const url = new URL(req.url);
+
+      if (req.mode === "navigate") {
+        event.respondWith((async () => {
+          try {
+            const fresh = await fetch(req);
+            const cache = await caches.open(CACHE_NAME);
+            cache.put(req, fresh.clone());
+            return fresh;
+          } catch (_err) {
+            const cached = await caches.match(req);
+            if (cached) {
+              return cached;
+            }
+            return caches.match(new URL("index.html", self.registration.scope).href);
+          }
+        })());
+        return;
+      }
+
+      if (url.origin === self.location.origin && (STATIC_DESTINATIONS.has(req.destination) || /\\.(css|js)$/.test(url.pathname))) {
+        event.respondWith((async () => {
+          const cached = await caches.match(req);
+          if (cached) {
+            return cached;
+          }
+          try {
+            const fresh = await fetch(req);
+            const cache = await caches.open(CACHE_NAME);
+            cache.put(req, fresh.clone());
+            return fresh;
+          } catch (_err) {
+            return cached || Response.error();
+          }
+        })());
+      }
+    });
+  `;
+}
+
+function initAnalyticsCharts() {
+  if (typeof Chart === "undefined") {
+    return;
+  }
+
+  const barCanvas = document.getElementById("monthly-expenses-chart");
+  const donutCanvas = document.getElementById("category-expenses-chart");
+  if (!barCanvas || !donutCanvas) {
+    return;
+  }
+
+  if (monthlyChart) {
+    monthlyChart.destroy();
+  }
+  if (categoryChart) {
+    categoryChart.destroy();
+  }
+
+  const sixMonths = getLastMonths(state.ui.analyticsMonth, 6);
+  const currency = state.ui.reportCurrency;
+
+  const monthlyData = sixMonths.map((mk) => {
+    return state.transactions
+      .filter((tx) => tx.type === "expense" && tx.currency === currency && tx.dateISO.startsWith(mk))
+      .reduce((sum, tx) => sum + tx.amount, 0);
+  });
+
+  monthlyChart = new Chart(barCanvas, {
+    type: "bar",
+    data: {
+      labels: sixMonths.map(formatMonthLabel),
+      datasets: [{
+        label: `Расходы (${currency})`,
+        data: monthlyData,
+        backgroundColor: "rgba(232, 80, 2, 0.75)",
+        borderColor: "rgba(232, 80, 2, 1)",
+        borderWidth: 1,
+        borderRadius: 8
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 300 },
+      plugins: {
+        legend: { labels: { color: "#f9f9f9" } }
+      },
+      scales: {
+        x: { ticks: { color: "#a7a7a7" }, grid: { color: "rgba(255,255,255,0.08)" } },
+        y: { ticks: { color: "#a7a7a7" }, grid: { color: "rgba(255,255,255,0.08)" } }
+      }
+    }
+  });
+
+  const catTotalsMap = new Map();
+  state.transactions
+    .filter(
+      (tx) => tx.type === "expense" && tx.currency === currency && tx.dateISO.startsWith(state.ui.analyticsMonth)
+    )
+    .forEach((tx) => {
+      const cat = findCategoryById(tx.categoryId);
+      const name = cat ? cat.name : "Без категории";
+      catTotalsMap.set(name, (catTotalsMap.get(name) || 0) + tx.amount);
+    });
+
+  const donutLabels = Array.from(catTotalsMap.keys());
+  const donutData = Array.from(catTotalsMap.values());
+
+  categoryChart = new Chart(donutCanvas, {
+    type: "doughnut",
+    data: {
+      labels: donutLabels.length ? donutLabels : ["Нет данных"],
+      datasets: [{
+        data: donutData.length ? donutData : [1],
+        backgroundColor: donutData.length
+          ? ["#E85002", "#F16001", "#C10801", "#D9C3AB", "#A7A7A7", "#646464", "#333333"]
+          : ["#333333"],
+        borderColor: "rgba(0,0,0,0.3)",
+        borderWidth: 1
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 300 },
+      plugins: {
+        legend: {
+          labels: {
+            color: "#f9f9f9",
+            boxWidth: 12
+          }
+        }
+      }
+    }
+  });
+}
+
+function loadAll() {
+  const rawTransactions = readJSON(STORAGE_KEYS.transactions, []);
+  const rawCategories = readJSON(STORAGE_KEYS.categories, null);
+  const rawBudgets = readJSON(STORAGE_KEYS.budgets, []);
+  const rawSettings = readJSON(STORAGE_KEYS.settings, DEFAULT_SETTINGS);
+  const rawRecurring = readJSON(STORAGE_KEYS.recurring, []);
+
+  state.settings = normalizeSettings(rawSettings);
+  state.categories = Array.isArray(rawCategories) && rawCategories.length
+    ? normalizeCategories(rawCategories)
+    : seedDefaultCategories();
+
+  const categoriesMap = new Map(state.categories.map((c) => [c.id, c]));
+  state.transactions = normalizeTransactions(rawTransactions, categoriesMap);
+  state.budgets = normalizeBudgets(rawBudgets, categoriesMap);
+  state.recurring = normalizeRecurring(rawRecurring, categoriesMap);
+
+  ensureDataIntegrity();
+  applyRecurringTransactions();
+  state.ui.reportCurrency = state.settings.defaultCurrency;
+
+  saveAll();
+}
+
+function ensureDataIntegrity() {
+  ensureOtherCategory("expense");
+  ensureOtherCategory("income");
+
+  const categoriesMap = new Map(state.categories.map((c) => [c.id, c]));
+
+  state.transactions = state.transactions.map((tx) => {
+    const cat = categoriesMap.get(tx.categoryId);
+    if (!cat || cat.type !== tx.type) {
+      return { ...tx, categoryId: ensureOtherCategory(tx.type) };
+    }
+    return tx;
+  });
+
+  state.budgets = state.budgets.filter((b) => {
+    const cat = categoriesMap.get(b.categoryId);
+    return Boolean(cat && cat.type === "expense");
+  });
+
+  state.recurring = state.recurring.map((rule) => {
+    const cat = categoriesMap.get(rule.categoryId);
+    if (!cat || cat.type !== rule.type) {
+      return { ...rule, categoryId: ensureOtherCategory(rule.type) };
+    }
+    return rule;
+  });
+
+  normalizeCategoryOrder("expense");
+  normalizeCategoryOrder("income");
+}
+
+function saveAll() {
+  saveTransactions();
+  saveCategories();
+  saveBudgets();
+  saveSettings();
+  saveRecurring();
+}
+
+function saveTransactions() {
+  writeJSON(STORAGE_KEYS.transactions, state.transactions);
+}
+
+function saveCategories() {
+  writeJSON(STORAGE_KEYS.categories, state.categories);
+}
+
+function saveBudgets() {
+  writeJSON(STORAGE_KEYS.budgets, state.budgets);
+}
+
+function saveSettings() {
+  writeJSON(STORAGE_KEYS.settings, state.settings);
+}
+
+function saveRecurring() {
+  writeJSON(STORAGE_KEYS.recurring, state.recurring);
+}
+
+function seedDefaultCategories() {
+  const out = [];
+  ["expense", "income"].forEach((type) => {
+    DEFAULT_CATEGORY_NAMES[type].forEach((name, index) => {
+      out.push({
+        id: uid("cat"),
+        type,
+        name,
+        isSystem: true,
+        order: index
+      });
+    });
+  });
+  return out;
+}
+
+function normalizeCategories(raw) {
+  const safe = [];
+  raw.forEach((item, index) => {
+    if (!item || typeof item !== "object") {
+      return;
+    }
+    const type = sanitizeType(item.type);
+    const name = String(item.name || "").trim();
+    if (!name) {
+      return;
+    }
+    safe.push({
+      id: String(item.id || uid("cat")),
+      type,
+      name,
+      isSystem: Boolean(item.isSystem),
+      order: Number.isFinite(Number(item.order)) ? Number(item.order) : index
+    });
+  });
+
+  const dedup = [];
+  const seen = new Set();
+  safe.forEach((cat) => {
+    const key = `${cat.type}::${normalize(cat.name)}`;
+    if (!seen.has(key)) {
+      dedup.push(cat);
+      seen.add(key);
+    }
+  });
+
+  return dedup;
+}
+
+function normalizeTransactions(raw, categoriesMap) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+
+      const type = sanitizeType(item.type);
+      const amount = parseNumber(item.amount);
+      if (!(amount > 0)) {
+        return null;
+      }
+
+      const currency = sanitizeCurrency(item.currency, DEFAULT_SETTINGS.defaultCurrency);
+      const categoryId = String(item.categoryId || "");
+      const date = sanitizeDateISO(item.dateISO);
+      const note = String(item.note || "").trim();
+      const rawId = Number(item.id);
+      const id = Number.isFinite(rawId) ? rawId : nextId();
+
+      let finalCategoryId = categoryId;
+      const cat = categoriesMap.get(categoryId);
+      if (!cat || cat.type !== type) {
+        finalCategoryId = "";
+      }
+
+      return {
+        id,
+        type,
+        amount,
+        currency,
+        categoryId: finalCategoryId,
+        dateISO: date,
+        note
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeBudgets(raw, categoriesMap) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const seen = new Set();
+  const out = [];
+
+  raw.forEach((item) => {
+    if (!item || typeof item !== "object") {
+      return;
+    }
+
+    const monthKey = sanitizeMonthKey(item.monthKey, "");
+    const categoryId = String(item.categoryId || "");
+    const amount = parseNumber(item.amount);
+    const currency = sanitizeCurrency(item.currency, DEFAULT_SETTINGS.defaultCurrency);
+    const cat = categoriesMap.get(categoryId);
+
+    if (!monthKey || !(amount > 0) || !cat || cat.type !== "expense") {
+      return;
+    }
+
+    const key = `${monthKey}|${categoryId}|${currency}`;
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    out.push({ monthKey, categoryId, amount, currency });
+  });
+
+  return out;
+}
+
+function normalizeSettings(raw) {
+  const baseCurrency = sanitizeCurrency(raw && raw.baseCurrency, DEFAULT_SETTINGS.baseCurrency);
+  const defaultCurrency = sanitizeCurrency(raw && raw.defaultCurrency, DEFAULT_SETTINGS.defaultCurrency);
+  return { baseCurrency, defaultCurrency };
+}
+
+function ensureOtherCategory(type) {
+  const normalizedType = sanitizeType(type);
+  const existing = findCategoryByName(normalizedType, "Другое");
+  if (existing) {
+    return existing.id;
+  }
+
+  const maxOrder = getCategoriesByType(normalizedType).reduce((max, c) => Math.max(max, c.order), -1);
+  const cat = {
+    id: uid("cat"),
+    type: normalizedType,
+    name: "Другое",
+    isSystem: true,
+    order: maxOrder + 1
+  };
+  state.categories.push(cat);
+  return cat.id;
+}
+
+function normalizeCategoryOrder(type) {
+  const list = getCategoriesByType(type);
+  list.forEach((cat, idx) => {
+    const target = findCategoryById(cat.id);
+    if (target) {
+      target.order = idx;
+    }
+  });
+}
+
+function getCategoriesByType(type) {
+  const t = sanitizeType(type);
+  return state.categories
+    .filter((c) => c.type === t)
+    .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, "ru"));
+}
+
+function findCategoryById(id) {
+  return state.categories.find((c) => c.id === id) || null;
+}
+
+function findCategoryByName(type, name) {
+  const n = normalize(name);
+  return state.categories.find((c) => c.type === sanitizeType(type) && normalize(c.name) === n) || null;
+}
+
+function parseQuickInput(text) {
+  const tokens = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) {
+    return { ok: false, message: "Пустой ввод" };
+  }
+
+  const amountToken = tokens.shift();
+  const amountRaw = amountToken.replace(/,/g, ".");
+  const amount = Number.parseFloat(amountRaw);
+
+  if (!Number.isFinite(amount) || amount === 0) {
+    return { ok: false, message: "Неверная сумма" };
+  }
+
+  const type = amountRaw.startsWith("+") ? "income" : "expense";
+  const positiveAmount = Math.abs(amount);
+
+  let currency = "";
+  if (tokens.length) {
+    const maybeCurrency = String(tokens[tokens.length - 1]).toUpperCase();
+    if (CURRENCIES.includes(maybeCurrency)) {
+      currency = maybeCurrency;
+      tokens.pop();
+    }
+  }
+
+  const categoryName = tokens.join(" ").trim();
+  if (!categoryName) {
+    return { ok: false, message: "Укажите категорию" };
+  }
+
+  return {
+    ok: true,
+    type,
+    amount: positiveAmount,
+    currency,
+    categoryName
+  };
+}
+
+function currencyOptions(selected) {
+  return CURRENCIES.map((currency) => {
+    return `<option value="${currency}" ${currency === selected ? "selected" : ""}>${currency}</option>`;
+  }).join("");
+}
+
+function categoryOptions(type, selectedId) {
+  return getCategoriesByType(type)
+    .map((cat) => `<option value="${cat.id}" ${cat.id === selectedId ? "selected" : ""}>${escapeHtml(cat.name)}</option>`)
+    .join("");
+}
+
+function readJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) {
+      return fallback;
+    }
+    return JSON.parse(raw);
+  } catch (_err) {
+    return fallback;
+  }
+}
+
+function writeJSON(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (_err) {
+    showToast("Ошибка сохранения localStorage");
+  }
+}
+
+function nextId() {
+  return Date.now() + Math.floor(Math.random() * 100000);
+}
+
+function uid(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function sanitizeType(value) {
+  return value === "income" ? "income" : "expense";
+}
+
+function sanitizeCurrency(value, fallback) {
+  const code = String(value || "").toUpperCase();
+  return CURRENCIES.includes(code) ? code : fallback;
+}
+
+function sanitizeDateISO(value) {
+  const str = String(value || "");
+  return /^\d{4}-\d{2}-\d{2}$/.test(str) ? str : dateISO(new Date());
+}
+
+function sanitizeMonthKey(value, fallback) {
+  const str = String(value || "");
+  return /^\d{4}-\d{2}$/.test(str) ? str : fallback;
+}
+
+function dateISO(date) {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+function monthKeyOf(date) {
+  return dateISO(date).slice(0, 7);
+}
+
+function parseNumber(value) {
+  const n = String(value || "").trim().replace(/\s+/g, "").replace(/,/g, ".");
+  return Number.parseFloat(n);
+}
+
+function formatAmount(value) {
+  return new Intl.NumberFormat("ru-RU", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2
+  }).format(Number(value) || 0);
+}
+
+function formatSigned(value) {
+  const num = Number(value) || 0;
+  const sign = num > 0 ? "+" : num < 0 ? "−" : "";
+  return `${sign}${formatAmount(Math.abs(num))}`;
+}
+
+function formatDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleDateString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  });
+}
+
+function formatMonthLabel(monthKey) {
+  const [year, month] = monthKey.split("-");
+  const date = new Date(Number(year), Number(month) - 1, 1);
+  return date.toLocaleDateString("ru-RU", { month: "short", year: "2-digit" });
+}
+
+function getLastMonths(endMonthKey, count) {
+  const [year, month] = endMonthKey.split("-").map(Number);
+  const end = new Date(year, month - 1, 1);
+  const result = [];
+
+  for (let i = count - 1; i >= 0; i -= 1) {
+    const d = new Date(end.getFullYear(), end.getMonth() - i, 1);
+    result.push(monthKeyOf(d));
+  }
+
+  return result;
+}
+
+function allCategoriesOptions(selectedId) {
+  return [...state.categories]
+    .sort((a, b) => a.type.localeCompare(b.type) || a.order - b.order)
+    .map((cat) => {
+      const prefix = cat.type === "income" ? "Доход" : "Расход";
+      return `<option value="${cat.id}" ${cat.id === selectedId ? "selected" : ""}>${prefix}: ${escapeHtml(cat.name)}</option>`;
+    })
+    .join("");
+}
+
+function groupTransactionsByDate(transactions) {
+  const today = dateISO(new Date());
+  const yesterday = dateISO(new Date(Date.now() - 86400000));
+  const map = new Map();
+
+  transactions.forEach((tx) => {
+    let label = formatDate(tx.dateISO);
+    if (tx.dateISO === today) {
+      label = "Сегодня";
+    } else if (tx.dateISO === yesterday) {
+      label = "Вчера";
+    }
+    if (!map.has(label)) {
+      map.set(label, []);
+    }
+    map.get(label).push(tx);
+  });
+
+  return Array.from(map.entries()).map(([label, items]) => ({ label, items }));
+}
+
+function weekdayLabel(day) {
+  const labels = ["Воскресенье", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"];
+  const idx = Number(day);
+  return Number.isInteger(idx) && idx >= 0 && idx <= 6 ? labels[idx] : labels[1];
+}
+
+function normalize(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function showToast(message, action = null, duration = 2000) {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+  }
+
+  activeToastAction = null;
+  if (action && typeof action.onClick === "function") {
+    activeToastAction = action.onClick;
+    toastEl.innerHTML = `
+      <div class="toast-content">
+        <span>${escapeHtml(message)}</span>
+        <button class="toast-action" type="button" data-toast-action="true">${escapeHtml(action.label || "Ок")}</button>
+      </div>
+    `;
+  } else {
+    toastEl.textContent = message;
+  }
+
+  toastEl.classList.remove("hidden");
+  toastTimer = setTimeout(() => {
+    toastEl.classList.add("hidden");
+    activeToastAction = null;
+  }, duration);
+}
+
+function closeModal() {
+  modalRoot.classList.add("hidden");
+  modalRoot.setAttribute("aria-hidden", "true");
+  modalRoot.innerHTML = "";
+}
