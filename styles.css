@@ -118,6 +118,20 @@ h3 {
   padding-bottom: calc(110px + env(safe-area-inset-bottom));
 }
 
+.auth-root {
+  width: min(100%, 460px);
+  margin: 0 auto;
+  min-height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  display: grid;
+  align-content: center;
+  padding: 16px 0 calc(24px + env(safe-area-inset-bottom));
+}
+
+.auth-card {
+  padding: 18px;
+  border-radius: 24px;
+}
+
 .glass {
   position: relative;
   background: var(--glass-bg);
