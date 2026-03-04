@@ -552,7 +552,7 @@ function buildBudgetsTab() {
           <h2>Бюджеты по категориям</h2>
         </div>
 
-        <div class="toolbar-row">
+        <div class="budget-filters">
           <div class="field">
             <label for="budgets-month">Месяц</label>
             <input id="budgets-month" type="month" value="${month}" />
