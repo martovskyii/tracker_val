@@ -423,6 +423,102 @@ button:active {
   gap: 12px;
 }
 
+.savings-filters {
+  display: grid;
+  gap: 10px;
+}
+
+.savings-summary {
+  display: grid;
+  gap: 6px;
+}
+
+.savings-total-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.savings-total-chip {
+  width: auto;
+  min-height: 30px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.8rem;
+}
+
+.savings-list {
+  display: grid;
+  gap: 10px;
+}
+
+.savings-card {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 14px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.savings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.savings-name {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.savings-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.savings-tag {
+  width: auto;
+  min-height: 26px;
+  border-radius: 999px;
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 0.75rem;
+  color: var(--text-soft);
+}
+
+.savings-balance {
+  font-size: 1.3rem;
+  font-weight: 700;
+  text-align: right;
+}
+
+.savings-goal-lines {
+  display: grid;
+  gap: 4px;
+}
+
+.savings-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.savings-actions .btn-small {
+  min-width: 90px;
+}
+
+.savings-modal-goal.hidden {
+  display: none;
+}
+
 .chart-wrap {
   position: relative;
   height: 240px;
@@ -521,7 +617,7 @@ button:active {
   border-radius: 22px;
   padding: 10px 8px;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   align-items: center;
   gap: 0;
   margin: 0;
@@ -560,7 +656,7 @@ button:active {
 }
 
 .tab-btn span {
-  font-size: 0.66rem;
+  font-size: 0.62rem;
 }
 
 .tab-btn.active {
@@ -718,6 +814,18 @@ button:active {
 @media (max-width: 420px) {
   .budget-filters {
     grid-template-columns: 1fr clamp(92px, 26vw, 132px);
+  }
+
+  .tab-btn span {
+    font-size: 0.58rem;
+  }
+
+  .savings-balance {
+    font-size: 1.16rem;
+  }
+
+  .savings-actions .btn-small {
+    min-width: 78px;
   }
 }
 
