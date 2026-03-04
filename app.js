@@ -1,14 +1,26 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut
+} from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
+import {
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  getFirestore,
+  doc,
+  getDoc,
+  setDoc,
+  collection,
+  getDocs,
+  deleteDoc,
+  writeBatch
+} from "https://www.gstatic.com/firebasejs/12.10.0/firebase-firestore.js";
+
 const TAB_IDS = ["add", "transactions", "analytics", "budgets", "settings", "savings"];
 const CURRENCIES = ["UAH", "USD", "EUR", "PLN", "GEL"];
-
-const STORAGE_KEYS = {
-  transactions: "ft_v1_transactions",
-  categories: "ft_v1_categories",
-  budgets: "ft_v1_budgets",
-  settings: "ft_v1_settings",
-  recurring: "ft_v1_recurring",
-  savings: "ft_v1_savings"
-};
 
 const DEFAULT_SETTINGS = {
   baseCurrency: "UAH",
@@ -18,6 +30,15 @@ const DEFAULT_SETTINGS = {
 const DEFAULT_CATEGORY_NAMES = {
   expense: ["Еда", "Аренда", "Транспорт", "Связь", "Здоровье", "Одежда", "Развлечения", "Подписки", "Дом", "Другое"],
   income: ["Зарплата", "Фриланс", "Подарки", "Другое"]
+};
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCgflrvW39mKvAv5hp9rKeNWK0A3GF5U5s",
+  authDomain: "trackerval-f372c.firebaseapp.com",
+  projectId: "trackerval-f372c",
+  storageBucket: "trackerval-f372c.firebasestorage.app",
+  messagingSenderId: "1016179762221",
+  appId: "1:1016179762221:web:6cf16e5fdf7fb5ebd204a4"
 };
 
 const state = {
@@ -49,24 +70,58 @@ const tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
 const modalRoot = document.getElementById("modal-root");
 const toastEl = document.getElementById("toast");
 const subtitleEl = document.getElementById("header-subtitle");
+const authRoot = document.getElementById("auth-root");
+const appRoot = document.getElementById("app-root");
 
 let toastTimer = null;
 let monthlyChart = null;
 let categoryChart = null;
 let activeToastAction = null;
+let currentUser = null;
 
 const pwaState = {
   swRegistration: null,
   reloading: false
 };
 
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+let db = null;
+
+try {
+  db = initializeFirestore(firebaseApp, {
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+  });
+} catch (_err) {
+  db = getFirestore(firebaseApp);
+}
+
 init();
 
 function init() {
-  loadAll();
   bindEvents();
-  render();
+  bindAuthEvents();
+  hideAppShell();
+  showAuthScreen();
+  observeAuth();
   setupPwa();
+}
+
+function observeAuth() {
+  onAuthStateChanged(auth, async (user) => {
+    if (user) {
+      currentUser = user;
+      hideAuthScreen();
+      showAppShell();
+      await loadAll();
+      render();
+      return;
+    }
+
+    currentUser = null;
+    hideAppShell();
+    showAuthScreen();
+  });
 }
 
 function bindEvents() {
@@ -89,6 +144,94 @@ function bindEvents() {
   modalRoot.addEventListener("click", onModalClick);
   modalRoot.addEventListener("submit", onModalSubmit);
   toastEl.addEventListener("click", onToastClick);
+}
+
+function bindAuthEvents() {
+  authRoot.addEventListener("submit", async (event) => {
+    const form = event.target;
+    if (!form.matches("[data-form='sign-in']")) {
+      return;
+    }
+    event.preventDefault();
+    const formData = new FormData(form);
+    const email = String(formData.get("email") || "").trim();
+    const password = String(formData.get("password") || "");
+    const statusEl = authRoot.querySelector("#auth-status");
+
+    if (!email || !password) {
+      if (statusEl) {
+        statusEl.textContent = "Введите email и пароль";
+      }
+      return;
+    }
+
+    if (statusEl) {
+      statusEl.textContent = "Вход...";
+    }
+
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      if (statusEl) {
+        statusEl.textContent = "";
+      }
+    } catch (error) {
+      if (statusEl) {
+        statusEl.textContent = mapAuthError(error);
+      }
+    }
+  });
+}
+
+function mapAuthError(error) {
+  const code = String(error && error.code || "");
+  if (code.includes("auth/invalid-credential") || code.includes("auth/wrong-password") || code.includes("auth/user-not-found")) {
+    return "Неверный email или пароль";
+  }
+  if (code.includes("auth/invalid-email")) {
+    return "Некорректный email";
+  }
+  if (code.includes("auth/too-many-requests")) {
+    return "Слишком много попыток. Попробуйте позже";
+  }
+  return "Не удалось войти. Проверьте интернет и данные";
+}
+
+function showAuthScreen() {
+  authRoot.innerHTML = `
+    <section class="auth-root-inner">
+      <article class="glass auth-card">
+        <div class="section-title">
+          <h2>Вход</h2>
+        </div>
+        <p class="card-note">Один аккаунт для доступа к данным</p>
+        <form class="form-grid" data-form="sign-in">
+          <div class="field">
+            <label for="auth-email">Email</label>
+            <input id="auth-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required />
+          </div>
+          <div class="field">
+            <label for="auth-password">Пароль</label>
+            <input id="auth-password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required />
+          </div>
+          <button class="btn-brand" type="submit">Sign in</button>
+          <p id="auth-status" class="io-status"></p>
+        </form>
+      </article>
+    </section>
+  `;
+  authRoot.classList.remove("hidden");
+}
+
+function hideAuthScreen() {
+  authRoot.classList.add("hidden");
+}
+
+function showAppShell() {
+  appRoot.classList.remove("hidden");
+}
+
+function hideAppShell() {
+  appRoot.classList.add("hidden");
 }
 
 function onToastClick(event) {
@@ -180,6 +323,13 @@ function onViewClick(event) {
 
   if (target.matches("[data-action='reset-all']")) {
     resetAllData();
+    return;
+  }
+
+  if (target.matches("[data-action='sign-out']")) {
+    signOut(auth).catch(() => {
+      showToast("Не удалось выйти");
+    });
     return;
   }
 
@@ -734,6 +884,13 @@ function buildSettingsTab() {
           <h2>Сброс</h2>
         </div>
         <button class="btn-danger" type="button" data-action="reset-all">Сбросить все данные</button>
+      </article>
+
+      <article class="glass glass-card">
+        <div class="section-title">
+          <h2>Аккаунт</h2>
+        </div>
+        <button class="btn-secondary" type="button" data-action="sign-out">Sign out</button>
       </article>
     </section>
   `;
@@ -2078,11 +2235,6 @@ function normalizeRecurring(raw, categoriesMap) {
     .filter(Boolean);
 }
 
-function loadSavings() {
-  const rawSavings = readJSON(STORAGE_KEYS.savings, []);
-  return normalizeSavings(rawSavings, state.settings.defaultCurrency);
-}
-
 function normalizeSavings(raw, fallbackCurrency = DEFAULT_SETTINGS.defaultCurrency) {
   if (!Array.isArray(raw)) {
     return [];
@@ -2409,10 +2561,7 @@ async function registerServiceWorker() {
   }
 
   try {
-    const swCode = buildServiceWorkerCode();
-    const swBlob = new Blob([swCode], { type: "text/javascript" });
-    const swUrl = URL.createObjectURL(swBlob);
-    const registration = await navigator.serviceWorker.register(swUrl);
+    const registration = await navigator.serviceWorker.register("./sw.js");
 
     pwaState.swRegistration = registration;
     monitorServiceWorkerUpdates(registration);
@@ -2428,8 +2577,8 @@ async function registerServiceWorker() {
       pwaState.reloading = true;
       window.location.reload();
     });
-  } catch (_err) {
-    showToast("Service Worker не зарегистрирован");
+  } catch (err) {
+    console.error("Service Worker registration failed:", err);
   }
 }
 
@@ -2459,90 +2608,6 @@ function showUpdateToast(registration) {
       }
     }
   }, 12000);
-}
-
-function buildServiceWorkerCode() {
-  return `
-    const CACHE_NAME = "ft-v1-cache-20260304-3";
-    const STATIC_DESTINATIONS = new Set(["style", "script"]);
-
-    function buildCoreUrls() {
-      const scope = self.registration.scope;
-      return [
-        new URL("/", scope).href,
-        new URL("./", scope).href,
-        new URL("index.html", scope).href,
-        new URL("styles.css", scope).href,
-        new URL("app.js", scope).href
-      ];
-    }
-
-    self.addEventListener("install", (event) => {
-      event.waitUntil((async () => {
-        const cache = await caches.open(CACHE_NAME);
-        await cache.addAll(buildCoreUrls());
-        await self.skipWaiting();
-      })());
-    });
-
-    self.addEventListener("activate", (event) => {
-      event.waitUntil((async () => {
-        const keys = await caches.keys();
-        await Promise.all(
-          keys
-            .filter((key) => key !== CACHE_NAME)
-            .map((key) => caches.delete(key))
-        );
-        await self.clients.claim();
-      })());
-    });
-
-    self.addEventListener("message", (event) => {
-      if (event.data && event.data.type === "SKIP_WAITING") {
-        self.skipWaiting();
-      }
-    });
-
-    self.addEventListener("fetch", (event) => {
-      const req = event.request;
-      const url = new URL(req.url);
-
-      if (req.mode === "navigate") {
-        event.respondWith((async () => {
-          try {
-            const fresh = await fetch(req);
-            const cache = await caches.open(CACHE_NAME);
-            cache.put(req, fresh.clone());
-            return fresh;
-          } catch (_err) {
-            const cached = await caches.match(req);
-            if (cached) {
-              return cached;
-            }
-            return caches.match(new URL("index.html", self.registration.scope).href);
-          }
-        })());
-        return;
-      }
-
-      if (url.origin === self.location.origin && (STATIC_DESTINATIONS.has(req.destination) || /\\.(css|js)$/.test(url.pathname))) {
-        event.respondWith((async () => {
-          const cached = await caches.match(req);
-          if (cached) {
-            return cached;
-          }
-          try {
-            const fresh = await fetch(req);
-            const cache = await caches.open(CACHE_NAME);
-            cache.put(req, fresh.clone());
-            return fresh;
-          } catch (_err) {
-            return cached || Response.error();
-          }
-        })());
-      }
-    });
-  `;
 }
 
 function initAnalyticsCharts() {
@@ -2648,12 +2713,15 @@ function initAnalyticsCharts() {
   });
 }
 
-function loadAll() {
-  const rawTransactions = readJSON(STORAGE_KEYS.transactions, []);
-  const rawCategories = readJSON(STORAGE_KEYS.categories, null);
-  const rawBudgets = readJSON(STORAGE_KEYS.budgets, []);
-  const rawSettings = readJSON(STORAGE_KEYS.settings, DEFAULT_SETTINGS);
-  const rawRecurring = readJSON(STORAGE_KEYS.recurring, []);
+async function loadAll() {
+  const [rawSettings, rawCategories, rawBudgets, rawRecurring, rawSavings, rawTransactions] = await Promise.all([
+    loadMetaDoc("settings_main", DEFAULT_SETTINGS),
+    loadMetaDoc("categories_list", null),
+    loadMetaDoc("budgets_list", []),
+    loadMetaDoc("recurring_list", []),
+    loadMetaDoc("savings_list", []),
+    loadTransactionsFromFirestore()
+  ]);
 
   state.settings = normalizeSettings(rawSettings);
   state.categories = Array.isArray(rawCategories) && rawCategories.length
@@ -2664,7 +2732,7 @@ function loadAll() {
   state.transactions = normalizeTransactions(rawTransactions, categoriesMap);
   state.budgets = normalizeBudgets(rawBudgets, categoriesMap);
   state.recurring = normalizeRecurring(rawRecurring, categoriesMap);
-  state.savings = loadSavings();
+  state.savings = normalizeSavings(rawSavings, state.settings.defaultCurrency);
 
   ensureDataIntegrity();
   applyRecurringTransactions();
@@ -2714,27 +2782,129 @@ function saveAll() {
 }
 
 function saveTransactions() {
-  writeJSON(STORAGE_KEYS.transactions, state.transactions);
+  if (!currentUser) {
+    return;
+  }
+  syncTransactionsToFirestore().catch(() => {
+    showToast("Ошибка сохранения операций");
+  });
 }
 
 function saveCategories() {
-  writeJSON(STORAGE_KEYS.categories, state.categories);
+  if (!currentUser) {
+    return;
+  }
+  saveMetaDoc("categories_list", state.categories).catch(() => {
+    showToast("Ошибка сохранения категорий");
+  });
 }
 
 function saveBudgets() {
-  writeJSON(STORAGE_KEYS.budgets, state.budgets);
+  if (!currentUser) {
+    return;
+  }
+  saveMetaDoc("budgets_list", state.budgets).catch(() => {
+    showToast("Ошибка сохранения бюджетов");
+  });
 }
 
 function saveSettings() {
-  writeJSON(STORAGE_KEYS.settings, state.settings);
+  if (!currentUser) {
+    return;
+  }
+  saveMetaDoc("settings_main", state.settings).catch(() => {
+    showToast("Ошибка сохранения настроек");
+  });
 }
 
 function saveRecurring() {
-  writeJSON(STORAGE_KEYS.recurring, state.recurring);
+  if (!currentUser) {
+    return;
+  }
+  saveMetaDoc("recurring_list", state.recurring).catch(() => {
+    showToast("Ошибка сохранения повторяющихся платежей");
+  });
 }
 
 function saveSavings() {
-  writeJSON(STORAGE_KEYS.savings, state.savings);
+  if (!currentUser) {
+    return;
+  }
+  saveMetaDoc("savings_list", state.savings).catch(() => {
+    showToast("Ошибка сохранения накоплений");
+  });
+}
+
+function userMetaDocRef(name) {
+  if (!currentUser) {
+    return null;
+  }
+  return doc(db, "users", currentUser.uid, "meta", name);
+}
+
+function userTxCollectionRef() {
+  if (!currentUser) {
+    return null;
+  }
+  return collection(db, "users", currentUser.uid, "transactions");
+}
+
+async function loadMetaDoc(name, fallback) {
+  const ref = userMetaDocRef(name);
+  if (!ref) {
+    return fallback;
+  }
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    return fallback;
+  }
+  const data = snap.data() || {};
+  if (!Object.prototype.hasOwnProperty.call(data, "value")) {
+    return fallback;
+  }
+  return data.value;
+}
+
+async function saveMetaDoc(name, value) {
+  const ref = userMetaDocRef(name);
+  if (!ref) {
+    return;
+  }
+  await setDoc(ref, { value }, { merge: true });
+}
+
+async function loadTransactionsFromFirestore() {
+  const txCol = userTxCollectionRef();
+  if (!txCol) {
+    return [];
+  }
+  const snapshot = await getDocs(txCol);
+  return snapshot.docs.map((d) => d.data() || {});
+}
+
+async function syncTransactionsToFirestore() {
+  const txCol = userTxCollectionRef();
+  if (!txCol) {
+    return;
+  }
+
+  const snapshot = await getDocs(txCol);
+  const existingIds = new Set(snapshot.docs.map((d) => d.id));
+  const desiredIds = new Set(state.transactions.map((tx) => String(tx.id)));
+  const batch = writeBatch(db);
+
+  state.transactions.forEach((tx) => {
+    const ref = doc(db, "users", currentUser.uid, "transactions", String(tx.id));
+    batch.set(ref, tx);
+  });
+
+  snapshot.docs.forEach((d) => {
+    if (!desiredIds.has(d.id)) {
+      batch.delete(d.ref);
+    }
+  });
+
+  await batch.commit();
 }
 
 function seedDefaultCategories() {
@@ -2972,26 +3142,6 @@ function categoryOptions(type, selectedId) {
   return getCategoriesByType(type)
     .map((cat) => `<option value="${cat.id}" ${cat.id === selectedId ? "selected" : ""}>${escapeHtml(cat.name)}</option>`)
     .join("");
-}
-
-function readJSON(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) {
-      return fallback;
-    }
-    return JSON.parse(raw);
-  } catch (_err) {
-    return fallback;
-  }
-}
-
-function writeJSON(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (_err) {
-    showToast("Ошибка сохранения localStorage");
-  }
 }
 
 function nextId() {
